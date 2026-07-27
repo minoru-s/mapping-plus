@@ -434,6 +434,8 @@
     #modal-backdrop {
       position: fixed;
       inset: 0;
+      height: 100vh;
+      height: 100dvh;
       z-index: 2000;
       display: grid;
       place-items: center;
@@ -445,7 +447,10 @@
     #modal-backdrop.hidden { display: none; }
     #info-modal {
       width: min(560px, 100%);
-      max-height: min(720px, calc(100vh - 48px));
+      max-height: min(640px, calc(100vh - 80px));
+      max-height: min(640px, calc(100dvh - 80px));
+      display: flex;
+      flex-direction: column;
       overflow: hidden;
       border: 1px solid rgba(255,255,255,.92);
       border-radius: 18px;
@@ -454,12 +459,18 @@
       color: #1d1d1f;
     }
     .modal-header {
-      height: 52px;
+      position: relative;
+      z-index: 1;
+      min-height: 52px;
+      flex: 0 0 52px;
       padding: 0 14px 0 20px;
       display: flex;
       align-items: center;
       justify-content: space-between;
       border-bottom: 1px solid rgba(60,60,67,.12);
+      background: rgba(252,253,255,.92);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
     }
     #modal-title { font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
     #modal-close {
@@ -481,7 +492,8 @@
       box-shadow: 0 0 0 3px rgba(0,122,255,.24);
     }
     #modal-body {
-      max-height: calc(min(720px, 100vh - 48px) - 52px);
+      flex: 1 1 auto;
+      min-height: 0;
       padding: 22px 24px 26px;
       overflow-y: auto;
       overscroll-behavior: contain;
@@ -563,9 +575,17 @@
       .titlebar-actions { right: 8px; }
       .info-button { padding: 4px 7px; font-size: 10px; }
       #status-bar .info-button { display: none; }
-      #modal-backdrop { padding: 12px; }
-      #info-modal { max-height: calc(100vh - 24px); border-radius: 15px; }
-      #modal-body { max-height: calc(100vh - 76px); padding: 18px; }
+      #modal-backdrop {
+        padding-top: max(32px, env(safe-area-inset-top));
+        padding-right: 12px;
+        padding-bottom: max(32px, env(safe-area-inset-bottom));
+        padding-left: 12px;
+      }
+      #info-modal {
+        max-height: min(640px, 100%);
+        border-radius: 15px;
+      }
+      #modal-body { padding: 18px; }
     }
 
     @media (prefers-reduced-motion: reduce) {
