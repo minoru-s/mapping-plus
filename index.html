@@ -6,6 +6,16 @@
   <title>Mapping Plus</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
 
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-12H9RSZG9S"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'G-12H9RSZG9S');
+  </script>
+
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 
   <style>
@@ -661,6 +671,7 @@
         <p>記録は内部の最小セル（Zoom 16ではおよそ20m四方）単位で削除されます。同じセルに複数回の記録がある場合、そのセル内の記録はまとめて削除されます。Zoom 12では一度に広い範囲を消しやすいため、細かな修正は十分に拡大して行ってください。</p>
         <h3>データの処理</h3>
         <p><strong>.mappingファイルとGPS記録はブラウザ内で処理され、サーバーへアップロードされません。</strong> 背景地図の表示には、インターネット経由でCARTO／OpenStreetMapの地図タイルを取得します。</p>
+        <p>利用状況の把握にはGoogle Analyticsを使用しており、ページの閲覧情報がGoogleへ送信される場合があります。.mappingファイルやGPS記録がAnalyticsを通じて送信されることはありません。</p>
       </div>
 
       <div id="modal-about" class="modal-content hidden" data-title="このツールについて">
