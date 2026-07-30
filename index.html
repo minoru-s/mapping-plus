@@ -20,6 +20,7 @@
 
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    [hidden] { display: none !important; }
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue',
@@ -92,6 +93,7 @@
       gap: 4px;
     }
     .info-button {
+      position: relative;
       min-height: 28px;
       padding: 4px 10px;
       border: 1px solid transparent;
@@ -102,6 +104,24 @@
       font-size: 11px;
       font-weight: 500;
       cursor: pointer;
+    }
+    .info-button.has-update-badge::after {
+      content: 'NEW';
+      position: absolute;
+      top: -5px;
+      right: -6px;
+      min-width: 22px;
+      padding: 1px 4px;
+      border: 1px solid rgba(255,255,255,.94);
+      border-radius: 999px;
+      background: linear-gradient(180deg, #ff5f57, #e9322a);
+      color: #fff;
+      box-shadow: 0 2px 6px rgba(160,24,19,.28);
+      font-size: 7px;
+      font-weight: 750;
+      line-height: 1.35;
+      letter-spacing: .03em;
+      pointer-events: none;
     }
     .info-button:hover {
       border-color: rgba(60,60,67,.12);
@@ -392,6 +412,65 @@
     }
     #save-btn:disabled { color: #6e6e73; border-color: rgba(60,60,67,.15); background: rgba(235,235,240,.75); }
 
+    /* ---- 期間絞り込み ---- */
+    #date-filter-panel {
+      position: fixed;
+      top: 62px;
+      left: 50%;
+      z-index: 920;
+      width: min(356px, calc(100vw - 28px));
+      padding: 14px;
+      transform: translateX(-50%);
+      border: 1.5px solid rgba(255,255,255,.94);
+      border-radius: 14px;
+      background: linear-gradient(145deg, rgba(255,255,255,.91), rgba(240,247,254,.76));
+      box-shadow: 0 14px 36px rgba(35,55,80,.2), inset 0 1px 0 rgba(255,255,255,.98);
+      backdrop-filter: saturate(185%) blur(24px);
+      -webkit-backdrop-filter: saturate(185%) blur(24px);
+    }
+    #date-filter-panel.hidden { display: none; }
+    .date-filter-fields {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 8px;
+      align-items: end;
+    }
+    .date-filter-fields label {
+      display: grid;
+      gap: 5px;
+      color: #6e6e73;
+      font-size: 10px;
+      font-weight: 600;
+    }
+    .date-filter-fields input {
+      width: 100%;
+      min-width: 0;
+      height: 32px;
+      padding: 0 7px;
+      border: 1px solid rgba(60,60,67,.2);
+      border-radius: 7px;
+      background: rgba(255,255,255,.82);
+      color: #1d1d1f;
+      font: inherit;
+      font-size: 11px;
+    }
+    .date-filter-separator { padding-bottom: 8px; color: #86868b; font-size: 11px; }
+    .date-filter-note {
+      margin-top: 10px;
+      color: #6e6e73;
+      font-size: 10px;
+      line-height: 1.45;
+    }
+    #date-filter-state {
+      margin-top: 8px;
+      color: #3a3a3c;
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+    }
+    .date-filter-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 11px; }
+    .date-filter-actions .tool-button { height: 30px; }
+    #date-filter-apply { color: #fff; border-color: #0071e3; background: #0071e3; }
+
     #brush-cursor {
       position: fixed;
       top: 0;
@@ -429,6 +508,137 @@
       transition: opacity .16s ease, transform .16s ease;
     }
     #toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    /* ---- セル情報ポップアップ（Canvasより上のLiquid Glass風レイヤー） ---- */
+    #cell-popup {
+      position: absolute;
+      z-index: 1200;
+      width: min(214px, calc(100vw - 24px));
+      padding: 13px 14px 22px;
+      overflow: visible;
+      border: 0;
+      background: transparent;
+      transform: translate(-50%, calc(-100% - 4px));
+    }
+    .cell-popup-glass {
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+      overflow: hidden;
+      background:
+        linear-gradient(145deg, rgba(255,255,255,.78), rgba(238,247,255,.56) 58%, rgba(255,255,255,.68));
+      backdrop-filter: blur(28px) saturate(190%) contrast(104%);
+      -webkit-backdrop-filter: blur(28px) saturate(190%) contrast(104%);
+      clip-path: url(#cell-popup-clip);
+      -webkit-clip-path: url(#cell-popup-clip);
+      filter:
+        drop-shadow(0 18px 24px rgba(31,55,82,.2))
+        drop-shadow(0 3px 5px rgba(31,55,82,.12));
+      pointer-events: none;
+    }
+    .cell-popup-glass::before {
+      content: '';
+      position: absolute;
+      inset: 1px 3px auto;
+      height: 44%;
+      border-radius: 14px 14px 46% 46%;
+      background: linear-gradient(180deg, rgba(255,255,255,.5), transparent);
+    }
+    #cell-popup.hidden { display: none; }
+    #cell-popup.is-below {
+      padding-top: 23px;
+      padding-bottom: 12px;
+      transform: translate(-50%, 4px);
+    }
+    #cell-popup.is-below .cell-popup-glass::before { top: 11px; }
+    #cell-popup-content {
+      position: relative;
+      z-index: 2;
+    }
+    .cell-popup-outline {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+      overflow: visible;
+      pointer-events: none;
+    }
+    .cell-popup-outline path {
+      fill: none;
+      stroke: rgba(255,255,255,.9);
+      stroke-width: 1.5;
+      vector-effect: non-scaling-stroke;
+      filter: drop-shadow(0 1px 0 rgba(42,66,94,.2));
+    }
+    #cell-popup-close {
+      position: absolute;
+      top: 9px;
+      right: 9px;
+      z-index: 3;
+      width: 25px;
+      height: 25px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(255,255,255,.62);
+      border-radius: 50%;
+      background: rgba(118,118,128,.12);
+      color: #5c5c61;
+      font: inherit;
+      padding: 0;
+      font-size: 16px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    #cell-popup.is-below #cell-popup-close { top: 19px; }
+    #cell-popup-close span {
+      display: block;
+      transform: translateY(-1px);
+    }
+    #cell-popup-close:hover { background: rgba(118,118,128,.2); color: #1d1d1f; }
+    #cell-popup-close:focus-visible { outline: 3px solid rgba(0,122,255,.24); outline-offset: 1px; }
+    .cell-info-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 8px;
+      padding-right: 23px;
+      color: #1d1d1f;
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .cell-info-title span {
+      width: 9px;
+      height: 9px;
+      flex: 0 0 auto;
+      border: 1px solid rgba(0,0,0,.16);
+      border-radius: 3px;
+    }
+    .cell-info dl { display: grid; gap: 6px; }
+    .cell-info dl div {
+      display: grid;
+      grid-template-columns: 48px minmax(0, 1fr);
+      gap: 6px;
+      align-items: baseline;
+    }
+    .cell-info dt { color: #86868b; font-size: 10px; }
+    .cell-info dd {
+      margin: 0;
+      color: #3a3a3c;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      white-space: nowrap;
+    }
+    .cell-info-filter-note {
+      margin-top: 8px;
+      padding-top: 7px;
+      border-top: 1px solid rgba(60,60,67,.12);
+      color: #8a5a00;
+      font-size: 9px;
+      line-height: 1.35;
+      text-align: right;
+    }
 
     /* ---- 情報モーダル ---- */
     #modal-backdrop {
@@ -515,6 +725,47 @@
     .modal-content strong { color: #1d1d1f; }
     .modal-content a { color: #0071e3; text-decoration: none; }
     .modal-content a:hover { text-decoration: underline; }
+    .update-history {
+      display: grid;
+      gap: 10px;
+    }
+    .update-entry {
+      padding: 12px 14px;
+      border: 1px solid rgba(60,60,67,.12);
+      border-radius: 11px;
+      background: rgba(118,118,128,.055);
+    }
+    .update-entry.latest {
+      border-color: rgba(0,122,255,.2);
+      background: rgba(0,122,255,.065);
+    }
+    .update-entry-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 7px;
+      color: #6e6e73;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+    .version-chip {
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: #0071e3;
+      color: #fff;
+      font-weight: 650;
+      letter-spacing: .01em;
+    }
+    .update-entry:not(.latest) .version-chip {
+      background: rgba(60,60,67,.16);
+      color: #4a4a4f;
+    }
+    .update-entry-title {
+      margin-bottom: 5px;
+      color: #1d1d1f;
+      font-weight: 650;
+    }
+    .update-entry ul { margin: 0; }
     .notice-box {
       margin-top: 14px;
       padding: 12px 14px;
@@ -568,6 +819,7 @@
       #status-text { min-width: 0; }
       #point-count { display: none; }
       #edit-toolbar { top: 8px; }
+      #date-filter-panel { top: 54px; }
       #edit-summary, .tool-label, .toolbar-divider { display: none; }
       #edit-toolbar { width: auto; }
       #save-btn { width: auto; min-width: 32px; }
@@ -604,6 +856,13 @@
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4.5 15.5l8.7-8.7a2.2 2.2 0 013.1 0l2.9 2.9a2.2 2.2 0 010 3.1l-6.7 6.7H8.5l-4-4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M10 19.5h9.5M8.2 11.8l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
     <span class="tool-label">消しゴム</span>
   </button>
+  <button id="date-filter-btn" class="tool-button" title="期間で絞り込む" aria-pressed="false" aria-expanded="false" aria-controls="date-filter-panel" hidden>
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="3.5" y="5.5" width="17" height="15" rx="2.5" stroke="currentColor" stroke-width="1.7"/>
+      <path d="M7.5 3.5v4M16.5 3.5v4M3.5 10h17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+    </svg>
+    <span class="tool-label">期間</span>
+  </button>
   <div class="toolbar-divider"></div>
   <button id="undo-btn" class="tool-button history-button" title="取り消す（⌘Z）" aria-label="取り消す" disabled>
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -620,8 +879,36 @@
   <span id="edit-summary">編集なし · Zoom 14</span>
   <button id="save-btn" class="tool-button" disabled>編集済みファイルを保存</button>
 </div>
+<section id="date-filter-panel" class="hidden" aria-label="表示期間の絞り込み" hidden>
+  <div class="date-filter-fields">
+    <label>開始日<input id="date-filter-start" type="date"></label>
+    <span class="date-filter-separator" aria-hidden="true">〜</span>
+    <label>終了日<input id="date-filter-end" type="date"></label>
+  </div>
+  <p class="date-filter-note">セルの初回〜最終訪問期間が、指定期間と重なるものを表示します。期間内の正確な訪問回数ではありません。絞り込み中は消しゴムを使用できません。</p>
+  <p id="date-filter-state">すべての期間を表示中</p>
+  <div class="date-filter-actions">
+    <button id="date-filter-clear" class="tool-button" type="button">解除</button>
+    <button id="date-filter-apply" class="tool-button" type="button">絞り込む</button>
+  </div>
+</section>
 <div id="brush-cursor" aria-hidden="true"></div>
 <div id="toast" role="status" aria-live="polite"></div>
+<svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <defs>
+    <clipPath id="cell-popup-clip" clipPathUnits="userSpaceOnUse">
+      <path id="cell-popup-clip-path"></path>
+    </clipPath>
+  </defs>
+</svg>
+<aside id="cell-popup" class="hidden" role="dialog" aria-label="セル情報">
+  <div class="cell-popup-glass" aria-hidden="true"></div>
+  <svg id="cell-popup-outline" class="cell-popup-outline" aria-hidden="true" preserveAspectRatio="none">
+    <path id="cell-popup-outline-path"></path>
+  </svg>
+  <button id="cell-popup-close" type="button" aria-label="セル情報を閉じる"><span aria-hidden="true">×</span></button>
+  <div id="cell-popup-content"></div>
+</aside>
 
 <!-- アップロードオーバーレイ -->
 <div id="upload-overlay">
@@ -681,14 +968,14 @@
       <div id="modal-usage" class="modal-content" data-title="使い方">
         <ol>
           <li><strong>.mappingファイルを開く</strong><br>ファイルを選択するか、ホーム画面へドラッグ＆ドロップします。</li>
-          <li><strong>地図を見る・移動する</strong><br>通常時はドラッグで移動し、ホイールやトラックパッドで拡大・縮小できます。</li>
-          <li><strong>不要な記録を消す</strong><br>Zoom 12以上まで拡大して「消しゴム」を選び、軌跡上をドラッグします。精密に消す場合はZoom 16を推奨します。</li>
+          <li><strong>地図を見る・移動する</strong><br>通常時はドラッグで移動し、ホイールやトラックパッドで拡大・縮小できます。色の付いたセルをクリックすると、記録回数と初回・最終訪問日時を確認できます。</li>
+          <li><strong>不要な記録を消す</strong><br>Zoom 10以上まで拡大して「消しゴム」を選び、軌跡上をドラッグします。精密に消す場合はZoom 16を推奨します。</li>
           <li><strong>確認して保存する</strong><br>Undo／Redoで調整し、「編集済みファイルを保存」を押します。ファイル名は保存時刻の <strong>YYYYMMDD-HHmmss.mapping</strong> になります。</li>
         </ol>
         <h3>元データについて</h3>
         <p>読み込んだ元ファイルを上書き・削除する処理はありません。編集結果は必ず別の.mappingファイルとしてダウンロードされます。念のため、動作確認が済むまでは元ファイルも保管してください。</p>
         <h3>消しゴムの挙動</h3>
-        <p>記録は内部の最小セル（Zoom 16ではおよそ20m四方）単位で削除されます。同じセルに複数回の記録がある場合、そのセル内の記録はまとめて削除されます。Zoom 12では一度に広い範囲を消しやすいため、細かな修正は十分に拡大して行ってください。</p>
+        <p>記録は内部の最小セル（Zoom 16ではおよそ20m四方）単位で削除されます。同じセルに複数回の記録がある場合、そのセル内の記録はまとめて削除されます。Zoom 10〜12では一度に広い範囲を消しやすいため、細かな修正は十分に拡大して行ってください。</p>
         <h3>データの処理</h3>
         <p><strong>.mappingファイルとGPS記録はブラウザ内で処理され、サーバーへアップロードされません。</strong> 背景地図の表示には、インターネット経由でCARTO／OpenStreetMapの地図タイルを取得します。</p>
         <p>利用状況の把握にはGoogle Analyticsを使用しており、ページの閲覧情報がGoogleへ送信される場合があります。.mappingファイルやGPS記録がAnalyticsを通じて送信されることはありません。</p>
@@ -696,6 +983,29 @@
 
       <div id="modal-about" class="modal-content hidden" data-title="このツールについて">
         <p>「マッピング」のバックアップデータをパソコンで閲覧し、GPSの位置飛びなど不要な記録を修正するための非公式Webツールです。</p>
+        <h3>アップデート履歴</h3>
+        <div class="update-history">
+          <article class="update-entry latest">
+            <div class="update-entry-header">
+              <span class="version-chip">v1.1.0</span>
+              <time datetime="2026-07-30">2026年7月30日</time>
+            </div>
+            <div class="update-entry-title">表示・編集機能をアップデート</div>
+            <ul>
+              <li>セルをクリックすると、記録回数と初回・最終訪問日時を確認できるようになりました。</li>
+              <li>ヒートマップの彩度を上げ、記録の密度を見分けやすくしました。</li>
+              <li>消しゴムをZoom 10以上から利用できるようにしました。</li>
+            </ul>
+          </article>
+          <article class="update-entry">
+            <div class="update-entry-header">
+              <span class="version-chip">v1.0.0</span>
+              <time datetime="2026-07-15">2026年7月15日</time>
+            </div>
+            <div class="update-entry-title">初回リリース</div>
+            <p>.mappingファイルのヒートマップ表示、不要なセルの削除、Undo／Redo、編集済みファイルの保存に対応しました。</p>
+          </article>
+        </div>
         <h3>免責事項</h3>
         <p>本ツールは「マッピング」公式の製品・サービスではありません。利用はご自身の責任で行い、重要なデータは必ずバックアップしてください。本ツールの利用によって生じたデータ損失、動作不良その他の損害について、製作者は責任を負いません。</p>
         <p>アプリ側のバックアップ形式が将来変更された場合、正常に読み書きできなくなる可能性があります。</p>
