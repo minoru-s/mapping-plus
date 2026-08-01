@@ -64,6 +64,7 @@ let insightsUpdateTimer = null;
 let municipalityBoundariesPromise = null;
 let municipalityLocationCache = new Map();
 let rankingLocationGeneration = 0;
+let rankingPanSync = null;
 
 const CURRENT_VERSION = '1.2.0';
 const UPDATE_SEEN_KEY = `mapping-plus-update-seen-${CURRENT_VERSION}`;
@@ -572,7 +573,33 @@ function focusRankingCell(cell) {
     showCellInfo(center).catch(console.error);
   };
   map.once('moveend', show);
-  map.setView(center, 16, { animate: true });
+  const sameZoom = map.getZoom() === 16;
+  const size = map.getSize();
+  const destination = map.latLngToContainerPoint(center);
+  const distance = destination.distanceTo(size.divideBy(2));
+  const canSlideCanvas = sameZoom && distance > 1 && distance <= Math.max(size.x, size.y) * 1.5;
+
+  if (canSlideCanvas) {
+    const anchor = map.getCenter();
+    const finalOffset = size.divideBy(2).subtract(destination);
+    rankingPanSync = {
+      anchor,
+      origin: map.latLngToContainerPoint(anchor),
+      frame: {
+        left: Math.max(0, Math.ceil(finalOffset.x)),
+        right: Math.max(0, Math.ceil(-finalOffset.x)),
+        top: Math.max(0, Math.ceil(finalOffset.y)),
+        bottom: Math.max(0, Math.ceil(-finalOffset.y)),
+      },
+    };
+    canvas.style.transition = 'none';
+    canvas.style.transformOrigin = '0 0';
+    redraw();
+    map.panTo(center, { animate: true, duration: 0.3 });
+  } else {
+    rankingPanSync = null;
+    map.setView(center, 16, { animate: !sameZoom });
+  }
   setTimeout(show, 450);
   if (window.matchMedia('(max-width: 560px)').matches) setInsightsPanelOpen(false);
 }
@@ -1031,11 +1058,16 @@ function hasCachedTiles(appZoom) {
 function redraw() {
   if (!ctx || !map || isZooming) return;
   const container = map.getContainer();
+  const frame = rankingPanSync?.frame || { left: 0, right: 0, top: 0, bottom: 0 };
+  const renderWidth = container.offsetWidth + frame.left + frame.right;
+  const renderHeight = container.offsetHeight + frame.top + frame.bottom;
   // サイズが変わった時だけリサイズ（毎フレームのリセットでちらつき防止）
-  if (canvas.width !== container.offsetWidth || canvas.height !== container.offsetHeight) {
-    canvas.width  = container.offsetWidth;
-    canvas.height = container.offsetHeight;
+  if (canvas.width !== renderWidth || canvas.height !== renderHeight) {
+    canvas.width  = renderWidth;
+    canvas.height = renderHeight;
   }
+  canvas.style.left = `${-frame.left}px`;
+  canvas.style.top = `${-frame.top}px`;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!innerZip) return;
 
@@ -1051,14 +1083,18 @@ function redraw() {
   }
   const Kz      = getKz(appZoom);
   const cellDeg = 1 / Kz;          // 1セル = cellDeg 度
-  const bounds  = map.getBounds();
+  const northWest = map.containerPointToLatLng(L.point(-frame.left, -frame.top));
+  const southEast = map.containerPointToLatLng(L.point(
+    container.offsetWidth + frame.right,
+    container.offsetHeight + frame.bottom
+  ));
   const f       = Kz / 1000;       // タイル番号算出係数
 
   // 描画タイル範囲
-  const aMin = Math.floor((bounds.getSouth() + 90)  * f);
-  const aMax = Math.floor((bounds.getNorth() + 90)  * f);
-  const bMin = Math.floor((bounds.getWest()  + 180) * f);
-  const bMax = Math.floor((bounds.getEast()  + 180) * f);
+  const aMin = Math.floor((southEast.lat + 90) * f);
+  const aMax = Math.floor((northWest.lat + 90) * f);
+  const bMin = Math.floor((northWest.lng + 180) * f);
+  const bMax = Math.floor((southEast.lng + 180) * f);
 
   // グリッド描画の表示判定に使う代表セル幅
   const center = map.getCenter();
@@ -1075,7 +1111,7 @@ function redraw() {
   function gridX(lng_i) {
     if (!xCache.has(lng_i)) {
       const lng = lng_i / Kz - 180;
-      xCache.set(lng_i, map.latLngToContainerPoint(L.latLng(center.lat, lng)).x);
+      xCache.set(lng_i, map.latLngToContainerPoint(L.latLng(center.lat, lng)).x + frame.left);
     }
     return xCache.get(lng_i);
   }
@@ -1083,7 +1119,7 @@ function redraw() {
   function gridY(lat_i) {
     if (!yCache.has(lat_i)) {
       const lat = lat_i / Kz - 90;
-      yCache.set(lat_i, map.latLngToContainerPoint(L.latLng(lat, center.lng)).y);
+      yCache.set(lat_i, map.latLngToContainerPoint(L.latLng(lat, center.lng)).y + frame.top);
     }
     return yCache.get(lat_i);
   }
@@ -1551,20 +1587,33 @@ async function init() {
   canvas.addEventListener('pointercancel', endPointerStroke);
 
   // ─── パン ───────────────────────────────────────────
-  // CSS transform によるズレを防ぐため、move 毎に直接再描画する。
-  // latLngToContainerPoint が mapPane 位置を既に考慮するので
-  // CSS transform との二重適用が発生しない。
+  // 通常のパンは move 毎に再描画する。ランキングからの近距離移動だけは、
+  // 描画済み Canvas を背景地図と同じ量だけ移動し、終了時に一度だけ再描画する。
   let rafId = null;
 
   map.on('move', () => {
     if (isZooming) return;        // ズームアニメーション中はスキップ
+    if (rankingPanSync) {
+      const point = map.latLngToContainerPoint(rankingPanSync.anchor);
+      const offset = point.subtract(rankingPanSync.origin);
+      canvas.style.transform = `translate3d(${offset.x}px, ${offset.y}px, 0)`;
+      return;
+    }
     if (rafId) cancelAnimationFrame(rafId);
     rafId = requestAnimationFrame(() => { rafId = null; redraw(); });
   });
 
   map.on('moveend', () => {
     if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    if (rankingPanSync) {
+      rankingPanSync = null;
+      canvas.style.transition = 'none';
+      canvas.style.transform = '';
+      canvas.style.transformOrigin = '';
+    }
     redraw();          // キャッシュ済みタイルで即時描画
+    void canvas.offsetWidth;
+    canvas.style.transition = '';
     scheduleUpdate();  // 不足タイルの非同期ロード
   });
 
@@ -1580,6 +1629,13 @@ async function init() {
     // 連続操作では前の非同期更新・遅延更新を次のアニメーションへ持ち越さない。
     updateGeneration++;
     clearTimeout(updateTimer);
+    if (rankingPanSync) {
+      rankingPanSync = null;
+      canvas.style.transition = 'none';
+      canvas.style.transform = '';
+      canvas.style.transformOrigin = '';
+      redraw();
+    }
 
     if (!isZooming) {
       // 直前のズーム終了と同一フレームでも、必ず identity から開始させる。
