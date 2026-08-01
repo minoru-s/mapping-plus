@@ -9,6 +9,8 @@ const CELL_ALPHA = 0.72;
 const CELL_POPUP_RADIUS = 16;
 const CELL_POPUP_ARROW_WIDTH = 20;
 const CELL_POPUP_ARROW_HEIGHT = 10;
+const EARTH_RADIUS_M = 6371008.8;
+const RANKING_LIMIT = 30;
 
 // マップズーム → アプリ内ズームレベル（低いほどタイルが少ない）
 function getAppZoom(mapZoom) {
@@ -54,8 +56,16 @@ let cellInfoRequestId = 0;
 let cellPopupLatLng = null;
 let dateFilterStart = null;
 let dateFilterEndExclusive = null;
+let zoom16Cells = [];
+let insightsReady = false;
+let insightsLoading = false;
+let insightsGeneration = 0;
+let insightsUpdateTimer = null;
+let municipalityBoundariesPromise = null;
+let municipalityLocationCache = new Map();
+let rankingLocationGeneration = 0;
 
-const CURRENT_VERSION = '1.1.0';
+const CURRENT_VERSION = '1.2.0';
 const UPDATE_SEEN_KEY = `mapping-plus-update-seen-${CURRENT_VERSION}`;
 
 // ========================= XOR 復号 =========================
@@ -72,8 +82,9 @@ const $ = id => document.getElementById(id);
 function setStatus(text) { $('status-text').textContent = text; }
 function setProgress(pct) { $('progress-fill').style.width = `${Math.min(100, pct)}%`; }
 function updateCount() {
-  $('point-count').textContent = totalCells > 0
-    ? `${totalCells.toLocaleString()} cells 読込済` : '';
+  const count = insightsReady ? zoom16Cells.length : totalCells;
+  $('point-count').textContent = count > 0
+    ? `${count.toLocaleString()} cells 読込済` : '';
 }
 
 function showToast(message) {
@@ -184,6 +195,7 @@ function updateEditUI() {
     ? `${deletedCells.size.toLocaleString()} cells · ${removedRecords.toLocaleString()} records 削除予定`
     : `編集なし · Zoom ${z}`;
   updateDateFilterUI();
+  scheduleInsightsUpdate();
 }
 
 function setEraserActive(active) {
@@ -226,6 +238,459 @@ function resetEdits() {
   if (endInput) endInput.value = '';
   $('date-filter-panel')?.classList.add('hidden');
   updateEditUI();
+}
+
+// ========================= ランキング・全体統計 =========================
+
+function setInsightsPanelOpen(open) {
+  const panel = $('insights-panel');
+  const button = $('insights-btn');
+  panel.classList.toggle('hidden', !open);
+  button.setAttribute('aria-expanded', String(open));
+  button.classList.toggle('active', open);
+  if (open) {
+    renderInsights();
+    $('insights-close').focus();
+  }
+}
+
+function resetInsights() {
+  insightsGeneration++;
+  rankingLocationGeneration++;
+  clearTimeout(insightsUpdateTimer);
+  zoom16Cells = [];
+  insightsReady = false;
+  insightsLoading = false;
+  $('insights-btn').disabled = true;
+  $('insights-loading').textContent = '訪問データを集計しています…';
+  $('insights-loading').classList.remove('hidden');
+  $('insights-content').classList.add('hidden');
+  setInsightsPanelOpen(false);
+}
+
+function zoom16CellAreaKm2(lat_i) {
+  const south = lat_i / K - 90;
+  const north = (lat_i + 1) / K - 90;
+  const deltaLng = Math.PI / 180 / K;
+  const band = Math.abs(
+    Math.sin(north * Math.PI / 180) - Math.sin(south * Math.PI / 180)
+  );
+  return EARTH_RADIUS_M * EARTH_RADIUS_M * deltaLng * band / 1_000_000;
+}
+
+function formatArea(areaKm2) {
+  if (areaKm2 < 0.01) {
+    return `${Math.round(areaKm2 * 1_000_000).toLocaleString()} m²`;
+  }
+  const maximumFractionDigits = areaKm2 >= 100 ? 1 : areaKm2 >= 1 ? 2 : 3;
+  return `${areaKm2.toLocaleString('ja-JP', { maximumFractionDigits })} km²`;
+}
+
+function formatStatDate(timestamp) {
+  const value = Number(timestamp);
+  if (!Number.isFinite(value) || value <= 0) return '—';
+  const date = new Date(value);
+  const pad = number => String(number).padStart(2, '0');
+  return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}`;
+}
+
+function nearestMunicipality(areaKm2) {
+  const municipalities = window.MUNICIPALITY_AREAS || [];
+  if (!(areaKm2 > 0) || municipalities.length === 0) return null;
+  return municipalities.reduce((nearest, municipality) => {
+    if (!nearest) return municipality;
+    const distance = Math.abs(Math.log(areaKm2 / municipality.area));
+    const nearestDistance = Math.abs(Math.log(areaKm2 / nearest.area));
+    return distance < nearestDistance ? municipality : nearest;
+  }, null);
+}
+
+function formatMunicipalityComparison(areaKm2) {
+  const municipality = nearestMunicipality(areaKm2);
+  if (!municipality) return '比較できるデータがありません';
+  const ratio = areaKm2 / municipality.area;
+  const place = `${municipality.pref}${municipality.name}`;
+  if (ratio >= 0.98 && ratio <= 1.02) {
+    return `${place}（${municipality.area.toLocaleString()} km²）とほぼ同じ広さ`;
+  }
+  const percent = ratio * 100;
+  const digits = percent < 10 ? 1 : 0;
+  return `${place}（${municipality.area.toLocaleString()} km²）の約${percent.toLocaleString('ja-JP', { maximumFractionDigits: digits })}%`;
+}
+
+async function loadMunicipalityBoundaries() {
+  if (!municipalityBoundariesPromise) {
+    municipalityBoundariesPromise = new Promise((resolve, reject) => {
+      if (Array.isArray(window.MAPPING_PLUS_MUNICIPALITY_BOUNDARIES)) {
+        resolve(window.MAPPING_PLUS_MUNICIPALITY_BOUNDARIES);
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = 'data/municipality-boundaries.js';
+      script.onload = () => {
+        if (Array.isArray(window.MAPPING_PLUS_MUNICIPALITY_BOUNDARIES)) {
+          resolve(window.MAPPING_PLUS_MUNICIPALITY_BOUNDARIES);
+        } else {
+          reject(new Error('自治体境界データの形式が正しくありません'));
+        }
+      };
+      script.onerror = () => reject(new Error('自治体境界データを読み込めません'));
+      document.head.appendChild(script);
+    }).catch(error => {
+      municipalityBoundariesPromise = null;
+      throw error;
+    });
+  }
+  return municipalityBoundariesPromise;
+}
+
+function decodeTopologyArcs(topology) {
+  const [scaleX, scaleY] = topology.transform.scale;
+  const [translateX, translateY] = topology.transform.translate;
+  return topology.arcs.map(encodedArc => {
+    let x = 0;
+    let y = 0;
+    const points = encodedArc.map(([deltaX, deltaY]) => {
+      x += deltaX;
+      y += deltaY;
+      return [x * scaleX + translateX, y * scaleY + translateY];
+    });
+    let west = Infinity;
+    let south = Infinity;
+    let east = -Infinity;
+    let north = -Infinity;
+    for (const [lng, lat] of points) {
+      west = Math.min(west, lng);
+      south = Math.min(south, lat);
+      east = Math.max(east, lng);
+      north = Math.max(north, lat);
+    }
+    return { points, bbox: [west, south, east, north] };
+  });
+}
+
+function collectArcIndexes(value, indexes) {
+  if (typeof value === 'number') {
+    indexes.push(value >= 0 ? value : ~value);
+    return;
+  }
+  for (const child of value || []) collectArcIndexes(child, indexes);
+}
+
+function geometryBounds(geometry, decodedArcs) {
+  const indexes = [];
+  collectArcIndexes(geometry.arcs, indexes);
+  let west = Infinity;
+  let south = Infinity;
+  let east = -Infinity;
+  let north = -Infinity;
+  for (const index of indexes) {
+    const bbox = decodedArcs[index]?.bbox;
+    if (!bbox) continue;
+    west = Math.min(west, bbox[0]);
+    south = Math.min(south, bbox[1]);
+    east = Math.max(east, bbox[2]);
+    north = Math.max(north, bbox[3]);
+  }
+  return [west, south, east, north];
+}
+
+function pointInBounds(lng, lat, bounds) {
+  return lng >= bounds[0] && lng <= bounds[2] && lat >= bounds[1] && lat <= bounds[3];
+}
+
+function topologyRing(arcIndexes, decodedArcs) {
+  const ring = [];
+  for (const reference of arcIndexes) {
+    const arc = decodedArcs[reference >= 0 ? reference : ~reference]?.points || [];
+    const points = reference >= 0 ? arc : [...arc].reverse();
+    ring.push(...(ring.length ? points.slice(1) : points));
+  }
+  return ring;
+}
+
+function pointInRing(lng, lat, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    const intersects = (yi > lat) !== (yj > lat) &&
+      lng < (xj - xi) * (lat - yi) / (yj - yi) + xi;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function pointInPolygonArcs(lng, lat, polygonArcs, decodedArcs) {
+  if (!polygonArcs?.length) return false;
+  if (!pointInRing(lng, lat, topologyRing(polygonArcs[0], decodedArcs))) return false;
+  for (let i = 1; i < polygonArcs.length; i++) {
+    if (pointInRing(lng, lat, topologyRing(polygonArcs[i], decodedArcs))) return false;
+  }
+  return true;
+}
+
+function pointInTopologyGeometry(lng, lat, geometry, decodedArcs) {
+  if (geometry.type === 'Polygon') {
+    return pointInPolygonArcs(lng, lat, geometry.arcs, decodedArcs);
+  }
+  if (geometry.type === 'MultiPolygon') {
+    return geometry.arcs.some(polygon => pointInPolygonArcs(lng, lat, polygon, decodedArcs));
+  }
+  return false;
+}
+
+async function resolveMunicipalityLocations(cells) {
+  const resolved = new Map();
+  const pending = [];
+  for (const cell of cells) {
+    const key = rowKey(cell.lat_i, cell.lng_i);
+    if (municipalityLocationCache.has(key)) {
+      resolved.set(key, municipalityLocationCache.get(key));
+      continue;
+    }
+    pending.push({
+      key,
+      lng: (cell.lng_i + 0.5) / K - 180,
+      lat: (cell.lat_i + 0.5) / K - 90,
+    });
+  }
+  if (pending.length === 0) return resolved;
+
+  const topologies = await loadMunicipalityBoundaries();
+  const unresolved = new Map(pending.map(point => [point.key, point]));
+  for (const topology of topologies) {
+    if (unresolved.size === 0) break;
+    const object = Object.values(topology.objects)[0];
+    const decodedArcs = decodeTopologyArcs(topology);
+    const features = object.geometries.map(geometry => ({
+      geometry,
+      bounds: geometryBounds(geometry, decodedArcs),
+    }));
+    const topologyBounds = features.reduce((bounds, feature) => [
+      Math.min(bounds[0], feature.bounds[0]),
+      Math.min(bounds[1], feature.bounds[1]),
+      Math.max(bounds[2], feature.bounds[2]),
+      Math.max(bounds[3], feature.bounds[3]),
+    ], [Infinity, Infinity, -Infinity, -Infinity]);
+
+    for (const point of [...unresolved.values()]) {
+      if (!pointInBounds(point.lng, point.lat, topologyBounds)) continue;
+      for (const feature of features) {
+        if (!pointInBounds(point.lng, point.lat, feature.bounds)) continue;
+        if (!pointInTopologyGeometry(point.lng, point.lat, feature.geometry, decodedArcs)) continue;
+        const properties = feature.geometry.properties || {};
+        const prefecture = properties.N03_001 || '';
+        const municipality = properties.N03_004 || '';
+        if (!municipality || municipality === '所属未定地') continue;
+        const location = `${prefecture}${municipality}`;
+        municipalityLocationCache.set(point.key, location);
+        resolved.set(point.key, location);
+        unresolved.delete(point.key);
+        break;
+      }
+    }
+  }
+
+  for (const point of unresolved.values()) {
+    municipalityLocationCache.set(point.key, null);
+    resolved.set(point.key, null);
+  }
+  return resolved;
+}
+
+async function populateRankingLocations(targets) {
+  const generation = ++rankingLocationGeneration;
+  try {
+    const locations = await resolveMunicipalityLocations(targets.map(target => target.cell));
+    if (generation !== rankingLocationGeneration) return;
+    for (const target of targets) {
+      if (!target.place.isConnected) continue;
+      const key = rowKey(target.cell.lat_i, target.cell.lng_i);
+      const location = locations.get(key);
+      target.place.textContent = location || '地域不明';
+      target.button.setAttribute(
+        'aria-label',
+        `第${target.rank}位、${target.cell.remainingVal.toLocaleString()}回、${location || '地域不明'}、地図で見る`
+      );
+    }
+  } catch (error) {
+    console.warn('自治体名の判定に失敗しました:', error);
+    if (generation !== rankingLocationGeneration) return;
+    for (const target of targets) {
+      if (target.place.isConnected) target.place.textContent = '地域を判定できません';
+    }
+  }
+}
+
+function calculateInsights() {
+  const ranking = [];
+  const areaByLatitude = new Map();
+  let cellCount = 0;
+  let visitCount = 0;
+  let areaKm2 = 0;
+  let firstVisit = Infinity;
+  let lastVisit = -Infinity;
+
+  for (const cell of zoom16Cells) {
+    const remainingVal = displayedValue(16, cell.lat_i, cell.lng_i, cell.val);
+    if (remainingVal <= 0) continue;
+    const bounds = cellVisitBounds(cell);
+    cellCount++;
+    visitCount += remainingVal;
+    if (!areaByLatitude.has(cell.lat_i)) {
+      areaByLatitude.set(cell.lat_i, zoom16CellAreaKm2(cell.lat_i));
+    }
+    areaKm2 += areaByLatitude.get(cell.lat_i);
+    if (Number.isFinite(bounds.first) && bounds.first > 0) firstVisit = Math.min(firstVisit, bounds.first);
+    if (Number.isFinite(bounds.last) && bounds.last > 0) lastVisit = Math.max(lastVisit, bounds.last);
+    ranking.push({ ...cell, remainingVal, firstVisit: bounds.first, lastVisit: bounds.last });
+  }
+
+  ranking.sort((a, b) => b.remainingVal - a.remainingVal || b.lastVisit - a.lastVisit);
+  return {
+    cellCount,
+    visitCount,
+    areaKm2,
+    firstVisit: Number.isFinite(firstVisit) ? firstVisit : null,
+    lastVisit: Number.isFinite(lastVisit) ? lastVisit : null,
+    ranking: ranking.slice(0, RANKING_LIMIT),
+  };
+}
+
+function focusRankingCell(cell) {
+  if (!map) return;
+  if (eraserActive) setEraserActive(false);
+  const center = L.latLng(
+    (cell.lat_i + 0.5) / K - 90,
+    (cell.lng_i + 0.5) / K - 180
+  );
+  let shown = false;
+  const show = () => {
+    if (shown) return;
+    shown = true;
+    showCellInfo(center).catch(console.error);
+  };
+  map.once('moveend', show);
+  map.setView(center, 16, { animate: true });
+  setTimeout(show, 450);
+  if (window.matchMedia('(max-width: 560px)').matches) setInsightsPanelOpen(false);
+}
+
+function renderInsights() {
+  if (!insightsReady) {
+    $('insights-loading').classList.remove('hidden');
+    $('insights-content').classList.add('hidden');
+    return;
+  }
+
+  const stats = calculateInsights();
+  $('insights-loading').classList.add('hidden');
+  $('insights-content').classList.remove('hidden');
+  $('stats-cell-count').textContent = `${stats.cellCount.toLocaleString()}セル`;
+  $('stats-visit-count').textContent = `${stats.visitCount.toLocaleString()}回`;
+  $('stats-area').textContent = formatArea(stats.areaKm2);
+  $('stats-date-range').textContent = stats.firstVisit && stats.lastVisit
+    ? `${formatStatDate(stats.firstVisit)}〜${formatStatDate(stats.lastVisit)}`
+    : '—';
+  $('municipality-comparison').textContent = formatMunicipalityComparison(stats.areaKm2);
+
+  const list = $('ranking-list');
+  list.replaceChildren();
+  if (stats.ranking.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'ranking-empty';
+    empty.textContent = '表示できるセルがありません';
+    list.appendChild(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  const locationTargets = [];
+  stats.ranking.forEach((cell, index) => {
+    const item = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'ranking-button';
+    button.setAttribute('aria-label', `第${index + 1}位、${cell.remainingVal.toLocaleString()}回、地図で見る`);
+    button.innerHTML = `
+      <span class="ranking-number">#${index + 1}</span>
+      <span class="ranking-main">
+        <span class="ranking-count">${cell.remainingVal.toLocaleString()}回</span>
+        <span class="ranking-meta">
+          <span>最終訪問 ${formatStatDate(cell.lastVisit)}</span>
+          <span class="ranking-meta-separator" aria-hidden="true">·</span>
+          <span class="ranking-place">地域を確認中…</span>
+        </span>
+      </span>
+      <span class="ranking-arrow" aria-hidden="true">›</span>`;
+    button.addEventListener('click', () => focusRankingCell(cell));
+    locationTargets.push({
+      rank: index + 1,
+      cell,
+      button,
+      place: button.querySelector('.ranking-place'),
+    });
+    item.appendChild(button);
+    fragment.appendChild(item);
+  });
+  list.appendChild(fragment);
+  if (!$('insights-panel').classList.contains('hidden')) {
+    populateRankingLocations(locationTargets);
+  }
+}
+
+function scheduleInsightsUpdate() {
+  if (!insightsReady) return;
+  clearTimeout(insightsUpdateTimer);
+  insightsUpdateTimer = setTimeout(renderInsights, 80);
+}
+
+async function prepareInsights() {
+  if (!innerZip || insightsLoading) return;
+  const generation = ++insightsGeneration;
+  insightsLoading = true;
+  insightsReady = false;
+  $('insights-btn').disabled = false;
+
+  const tiles = [];
+  innerZip.forEach(path => {
+    const match = path.match(/^hm_16_(\d+)_(\d+)\.db$/);
+    if (match) tiles.push({ a: Number(match[1]), b: Number(match[2]) });
+  });
+
+  let nextIndex = 0;
+  let completed = 0;
+  const updateLoadingText = () => {
+    $('insights-loading').textContent = `訪問データを集計しています… ${completed.toLocaleString()} / ${tiles.length.toLocaleString()}タイル`;
+  };
+  updateLoadingText();
+
+  const worker = async () => {
+    while (nextIndex < tiles.length) {
+      const tile = tiles[nextIndex++];
+      await loadTile(16, tile.a, tile.b);
+      completed++;
+      if (generation === insightsGeneration && (completed % 5 === 0 || completed === tiles.length)) {
+        updateLoadingText();
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(4, tiles.length) }, worker));
+  if (generation !== insightsGeneration) return;
+
+  const uniqueCells = new Map();
+  for (const tile of tiles) {
+    for (const cell of tileCache.get(`16_${tile.a}_${tile.b}`) || []) {
+      uniqueCells.set(rowKey(cell.lat_i, cell.lng_i), cell);
+    }
+  }
+  zoom16Cells = [...uniqueCells.values()];
+  insightsLoading = false;
+  insightsReady = true;
+  updateCount();
+  renderInsights();
 }
 
 // ========================= タイル読み込み =========================
@@ -963,6 +1428,7 @@ async function processFile(file) {
 
   updateGeneration++;
   resetEdits();
+  resetInsights();
   tileCache.clear(); loadingTasks.clear(); totalCells = 0; innerZip = null;
   sourceFileBytes = null;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -1005,6 +1471,11 @@ async function processFile(file) {
     setProgress(100);
 
     await doUpdate();
+    prepareInsights().catch(error => {
+      console.error(error);
+      insightsLoading = false;
+      $('insights-loading').textContent = '集計に失敗しました';
+    });
   } catch (e) {
     setStatus(`エラー: ${e.message}`);
     console.error(e);
@@ -1188,6 +1659,13 @@ async function init() {
   const fileInput = $('file-input');
 
   $('cell-popup-close').addEventListener('click', closeCellInfo);
+  $('insights-btn').addEventListener('click', () => {
+    setInsightsPanelOpen($('insights-panel').classList.contains('hidden'));
+  });
+  $('insights-close').addEventListener('click', () => {
+    setInsightsPanelOpen(false);
+    $('insights-btn').focus();
+  });
   $('date-filter-btn').addEventListener('click', () => {
     setDateFilterPanelOpen($('date-filter-panel').classList.contains('hidden'));
   });
@@ -1246,6 +1724,12 @@ async function init() {
   $('redo-btn').addEventListener('click', redoEdit);
   $('save-btn').addEventListener('click', exportEditedMapping);
   document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !$('insights-panel').classList.contains('hidden')) {
+      event.preventDefault();
+      setInsightsPanelOpen(false);
+      $('insights-btn').focus();
+      return;
+    }
     if (event.key === 'Escape' && !$('date-filter-panel').classList.contains('hidden')) {
       event.preventDefault();
       setDateFilterPanelOpen(false);
@@ -1276,6 +1760,7 @@ async function init() {
 
   $('reload-btn').addEventListener('click', () => {
     resetEdits();
+    resetInsights();
     $('edit-toolbar').classList.add('hidden');
     $('upload-overlay').classList.remove('hidden');
     fileInput.value = '';
