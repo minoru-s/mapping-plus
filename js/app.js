@@ -43,6 +43,7 @@ let updateTimer = null;
 let updateGeneration = 0;     // 古い非同期更新の再描画を無効化
 let isZooming = false;
 let sourceFileBytes = null;
+let sourceFileName = '';
 let eraserActive = false;
 let deletedCells = new Map(); // zoom16 の "lat,lng" -> 元レコード
 let deletionDeltas = new Map(); // zoom -> Map("lat,lng" -> 集約削除量)
@@ -65,8 +66,16 @@ let municipalityBoundariesPromise = null;
 let municipalityLocationCache = new Map();
 let rankingLocationGeneration = 0;
 let rankingPanSync = null;
+let mergeFiles = [null, null];
+let mergeSources = [null, null];
+let mergeAnalysis = null;
+let mergeBusy = false;
+let mergePreviewActive = false;
+let mergePreviewCanvas = null;
+let mergePreviewCtx = null;
+let mergePreviewFrame = null;
 
-const CURRENT_VERSION = '1.2.0';
+const CURRENT_VERSION = '1.3.0';
 const UPDATE_SEEN_KEY = `mapping-plus-update-seen-${CURRENT_VERSION}`;
 
 // ========================= XOR 復号 =========================
@@ -96,6 +105,15 @@ function showToast(message) {
   toastTimer = setTimeout(() => toast.classList.remove('show'), 2600);
 }
 
+function setToolbarMenuOpen(open) {
+  const menu = $('toolbar-overflow-menu');
+  const button = $('toolbar-menu-btn');
+  if (!menu || !button) return;
+  menu.classList.toggle('hidden', !open);
+  button.classList.toggle('active', open);
+  button.setAttribute('aria-expanded', String(open));
+}
+
 function setUpdateBadgeVisible(visible) {
   document.querySelectorAll('[data-modal-target="about"]').forEach(button => {
     button.classList.toggle('has-update-badge', visible);
@@ -123,6 +141,30 @@ function markUpdateSeen() {
   } catch (_) {
     // 表示中のページではバッジを消したままにする。
   }
+}
+
+function openMergeModal(trigger) {
+  if (!sourceFileBytes) return;
+  setToolbarMenuOpen(false);
+  if (deletedCells.size > 0) {
+    showToast('マージする前に、現在の編集内容を保存してください');
+    return;
+  }
+  const currentFile = new File(
+    [sourceFileBytes],
+    sourceFileName || 'current.mapping',
+    { type: 'application/octet-stream' }
+  );
+  mergeFiles = [currentFile, null];
+  mergeSources = [null, null];
+  mergeAnalysis = null;
+  $('merge-file-a-name').textContent = currentFile.name;
+  $('merge-file-b-name').textContent = '未選択';
+  $('merge-file-b').value = '';
+  $('merge-analyze').disabled = true;
+  $('merge-progress').classList.add('hidden');
+  $('merge-result').classList.add('hidden');
+  openInfoModal('merge', trigger);
 }
 
 function openInfoModal(name, trigger = null) {
@@ -186,15 +228,24 @@ function updateEditUI() {
     : z < MIN_EDIT_ZOOM
       ? `編集するにはZoom ${MIN_EDIT_ZOOM}以上まで拡大してください`
       : '消しゴム（E）';
+  const menuEraser = $('menu-eraser');
+  if (menuEraser) {
+    menuEraser.classList.toggle('active', eraserActive);
+    menuEraser.disabled = filterActive;
+    menuEraser.setAttribute('aria-pressed', String(eraserActive));
+    menuEraser.title = eraserBtn.title;
+  }
   $('undo-btn').disabled = undoStack.length === 0;
   $('redo-btn').disabled = redoStack.length === 0;
   $('save-btn').disabled = deletedCells.size === 0;
   const removedRecords = [...deletedCells.values()].reduce((sum, c) => sum + (c.val || 0), 0);
-  $('edit-summary').textContent = filterActive
+  const editSummary = filterActive
     ? '期間絞り込み中 · 消しゴム無効'
     : deletedCells.size
     ? `${deletedCells.size.toLocaleString()} cells · ${removedRecords.toLocaleString()} records 削除予定`
     : `編集なし · Zoom ${z}`;
+  $('edit-summary').textContent = editSummary;
+  $('edit-summary').title = editSummary;
   updateDateFilterUI();
   scheduleInsightsUpdate();
 }
@@ -1454,6 +1505,518 @@ async function exportEditedMapping() {
   }
 }
 
+// ========================= バックアップのマージ =========================
+
+function mergeRowKey(lat, lng) { return `${lat},${lng}`; }
+function mergeRowFirst(row) {
+  const first = Number(row?.p1) || Number(row?.tm) || 0;
+  return first > 0 ? first : 0;
+}
+function formatMergeDate(timestamp) {
+  if (!(timestamp > 0)) return '不明';
+  return new Date(timestamp).toLocaleString('ja-JP', {
+    year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+}
+
+async function readMergeSource(file, progress) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const outer = await JSZip.loadAsync(bytes);
+  let backupPath = null;
+  outer.forEach(path => { if (path.endsWith('.backup')) backupPath = path; });
+  if (!backupPath) throw new Error(`${file.name}: .backup が見つかりません`);
+  const backupEntry = outer.file(backupPath);
+  const backupBytes = await backupEntry.async('uint8array');
+  if (!new TextDecoder().decode(backupBytes.slice(0, 18)).startsWith('MyAllTracksBackup')) {
+    throw new Error(`${file.name}: 未対応フォーマットです`);
+  }
+  const zip = await JSZip.loadAsync(backupBytes.slice(HEADER_LEN));
+  const paths = [];
+  zip.forEach(path => { if (/^hm_16_\d+_\d+\.db$/.test(path)) paths.push(path); });
+  const cells = new Map();
+  let first = Infinity;
+  let last = -Infinity;
+  let visits = 0;
+  for (let index = 0; index < paths.length; index++) {
+    const encrypted = await zip.file(paths[index]).async('uint8array');
+    const db = new SQL.Database(xorDecrypt(encrypted));
+    try {
+      const result = db.exec('SELECT lat,lng,val,tm,p1,p2,p3,p4 FROM heatmap_table');
+      for (const values of result[0]?.values || []) {
+        const row = {
+          lat: Number(values[0]), lng: Number(values[1]), val: Number(values[2]) || 0,
+          tm: Number(values[3]) || 0, p1: Number(values[4]) || 0,
+          p2: Number(values[5]) || 0, p3: Number(values[6]) || 0, p4: Number(values[7]) || 0,
+        };
+        cells.set(mergeRowKey(row.lat, row.lng), row);
+        visits += row.val;
+        const rowFirst = mergeRowFirst(row);
+        if (rowFirst) first = Math.min(first, rowFirst);
+        if (row.tm) last = Math.max(last, row.tm);
+      }
+    } finally {
+      db.close();
+    }
+    if (index % 8 === 0) {
+      progress?.((index + 1) / Math.max(1, paths.length));
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    }
+  }
+  return {
+    file, bytes, backupPath, backupDate: backupEntry.date, backupHeader: backupBytes.slice(0, HEADER_LEN),
+    cells, first: Number.isFinite(first) ? first : 0, last: Number.isFinite(last) ? last : 0,
+    visits, tileCount: paths.length,
+  };
+}
+
+function sourceDominates(left, right) {
+  for (const [key, row] of right.cells) {
+    const candidate = left.cells.get(key);
+    if (!candidate || candidate.val < row.val) return false;
+  }
+  return true;
+}
+
+function analyzeMergeSources(a, b) {
+  let onlyA = 0, onlyB = 0, equal = 0, differing = 0;
+  let aHigher = 0, bHigher = 0;
+  const differences = [];
+  for (const [key, rowA] of a.cells) {
+    const rowB = b.cells.get(key);
+    if (!rowB) {
+      onlyA++;
+      differences.push({ kind: 'a', row: rowA });
+    } else if (rowA.val === rowB.val) {
+      equal++;
+    } else {
+      differing++;
+      if (rowA.val > rowB.val) aHigher++; else bHigher++;
+      differences.push({ kind: 'different', row: rowA.val >= rowB.val ? rowA : rowB });
+    }
+  }
+  for (const [key, rowB] of b.cells) {
+    if (!a.cells.has(key)) {
+      onlyB++;
+      differences.push({ kind: 'b', row: rowB });
+    }
+  }
+  const disjoint = a.last < b.first || b.last < a.first;
+  const aContainsPeriod = a.first <= b.first && a.last >= b.last;
+  const bContainsPeriod = b.first <= a.first && b.last >= a.last;
+  const aDominates = sourceDominates(a, b);
+  const bDominates = sourceDominates(b, a);
+  let type = 'partial';
+  let autoAction = null;
+  let editedIndex = null;
+  let containingIndex = null;
+  if (onlyA === 0 && onlyB === 0 && differing === 0) {
+    type = 'identical'; autoAction = { mode: 'max' };
+  } else if (disjoint) {
+    type = 'disjoint'; autoAction = { mode: 'sum' };
+  } else if (aContainsPeriod !== bContainsPeriod) {
+    containingIndex = aContainsPeriod ? 0 : 1;
+    const containingDominates = containingIndex === 0 ? aDominates : bDominates;
+    if (containingDominates) {
+      type = 'contained-clean'; autoAction = { mode: 'max' };
+    } else {
+      type = 'contained-conflict';
+      editedIndex = containingIndex;
+    }
+  } else if (aDominates !== bDominates) {
+    type = 'deletion';
+    editedIndex = aDominates ? 1 : 0;
+  }
+  return {
+    sources: [a, b], onlyA, onlyB, equal, differing, aHigher, bHigher, differences,
+    disjoint, aContainsPeriod, bContainsPeriod, aDominates, bDominates,
+    type, autoAction, editedIndex, containingIndex,
+  };
+}
+
+function mergeChoiceDescription(analysis) {
+  switch (analysis.type) {
+    case 'identical': return ['内容は同じです', '同じセルと回数が記録されています。新しい名前のコピーを保存できます。'];
+    case 'disjoint': return ['記録期間が重なっていません', 'それぞれの記録をそのまま追加して、安全に一本化できます。'];
+    case 'contained-clean': return ['一方の記録期間がもう一方を含んでいます', '長い期間側に足りないセルや回数だけを補います。細かな選択は必要ありません。'];
+    case 'deletion': return ['同じ期間の記録に、削除されたような違いがあります', '編集済みと思われる側を保つか、もう一方に残っている記録を戻すか選んでください。'];
+    case 'contained-conflict': return ['記録期間は含まれていますが、内容に逆向きの違いがあります', '長い期間側を基準にするか、両方に残っている記録を補うか選んでください。'];
+    default: return ['記録期間の一部が重なっています', '重なった部分の回数をどう扱うか選んでください。'];
+  }
+}
+
+function mergeOptions(analysis) {
+  if (analysis.autoAction) return [
+    { mode: analysis.autoAction.mode, title: 'この内容でまとめる', detail: '元ファイルは変更せず、新しい.mappingファイルを保存します。' },
+  ];
+  if (analysis.type === 'deletion' || analysis.type === 'contained-conflict') {
+    const label = analysis.editedIndex === 0 ? 'A' : 'B';
+    return [
+      { mode: 'preserve', sourceIndex: analysis.editedIndex, title: `消した状態を保つ（ファイル ${label} を基準）`, detail: '基準側で消えている記録を復活させません。' },
+      { mode: 'max', title: '残っている記録を戻す', detail: 'どちらかに残っているセルを採用し、同じセルの回数は大きい方を使います。' },
+      { mode: 'preview', title: '地図で違いを確認する', detail: '違う場所を色分けしてから決めます。' },
+    ];
+  }
+  return [
+    { mode: 'max', title: '重複を増やさずまとめる（推奨）', detail: '同じセルの回数は大きい方を採用します。通常はこちらが安全です。' },
+    { mode: 'sum', title: '両方の回数を足す', detail: '別端末で独立して記録した場合向けです。同じ移動が両方にあると二重になります。' },
+    { mode: 'preview', title: '地図で違いを確認する', detail: '違う場所を色分けしてから決めます。' },
+  ];
+}
+
+function renderMergeAnalysis() {
+  const analysis = mergeAnalysis;
+  const result = $('merge-result');
+  const [title, description] = mergeChoiceDescription(analysis);
+  const allStart = Math.min(...analysis.sources.map(source => source.first));
+  const allEnd = Math.max(...analysis.sources.map(source => source.last));
+  const span = Math.max(1, allEnd - allStart);
+  const periodRows = analysis.sources.map((source, index) => {
+    const left = (source.first - allStart) / span * 100;
+    const width = Math.max(0.8, (source.last - source.first) / span * 100);
+    return `<div class="merge-period-row"><span class="merge-period-label">${index ? 'B' : 'A'}</span><div class="merge-period-track"><span class="merge-period-bar" style="left:${left}%;width:${width}%"></span></div><span class="merge-period-date">${formatMergeDate(source.first)} 〜 ${formatMergeDate(source.last)} · ${source.cells.size.toLocaleString()}セル</span></div>`;
+  }).join('');
+  const options = mergeOptions(analysis).map((option, index) =>
+    `<button class="merge-option" type="button" data-merge-option="${index}"><strong>${option.title}</strong><span>${option.detail}</span></button>`
+  ).join('');
+  result.innerHTML = `<h3>${title}</h3><p>${description}</p><div class="merge-periods">${periodRows}</div><p>Aだけ ${analysis.onlyA.toLocaleString()}セル・Bだけ ${analysis.onlyB.toLocaleString()}セル・回数が違う共有セル ${analysis.differing.toLocaleString()}件</p><div class="merge-options">${options}</div>`;
+  result.classList.remove('hidden');
+  const choices = mergeOptions(analysis);
+  result.querySelectorAll('[data-merge-option]').forEach(button => {
+    button.addEventListener('click', () => selectMergeOption(choices[Number(button.dataset.mergeOption)]));
+  });
+}
+
+async function analyzeSelectedMergeFiles() {
+  if (mergeBusy || !mergeFiles[0] || !mergeFiles[1]) return;
+  mergeBusy = true;
+  $('merge-analyze').disabled = true;
+  $('merge-result').classList.add('hidden');
+  $('merge-progress').classList.remove('hidden');
+  try {
+    mergeSources = [];
+    for (let index = 0; index < 2; index++) {
+      $('merge-progress').textContent = `ファイル ${index ? 'B' : 'A'} を解析中…`;
+      mergeSources[index] = await readMergeSource(mergeFiles[index], ratio => {
+        $('merge-progress').textContent = `ファイル ${index ? 'B' : 'A'} を解析中… ${Math.round(ratio * 100)}%`;
+      });
+    }
+    $('merge-progress').textContent = '違いを比較しています…';
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    mergeAnalysis = analyzeMergeSources(mergeSources[0], mergeSources[1]);
+    renderMergeAnalysis();
+    $('merge-progress').classList.add('hidden');
+  } catch (error) {
+    console.error(error);
+    $('merge-progress').textContent = `解析できませんでした: ${error.message}`;
+  } finally {
+    mergeBusy = false;
+    $('merge-analyze').disabled = !(mergeFiles[0] && mergeFiles[1]);
+  }
+}
+
+function combinedMergeRow(a, b, mode) {
+  if (!a) return { ...b };
+  if (!b) return { ...a };
+  const val = mode === 'sum' ? a.val + b.val : Math.max(a.val, b.val);
+  const firstValues = [mergeRowFirst(a), mergeRowFirst(b)].filter(Boolean);
+  const first = firstValues.length ? Math.min(...firstValues) : 0;
+  return {
+    lat: a.lat, lng: a.lng, val,
+    tm: Math.max(a.tm || 0, b.tm || 0),
+    p1: val > 1 ? first : 0,
+    p2: mode === 'sum' ? (a.p2 || 0) + (b.p2 || 0) : Math.max(a.p2 || 0, b.p2 || 0),
+    p3: mode === 'sum' ? (a.p3 || 0) + (b.p3 || 0) : Math.max(a.p3 || 0, b.p3 || 0),
+    p4: mode === 'sum' ? (a.p4 || 0) + (b.p4 || 0) : Math.max(a.p4 || 0, b.p4 || 0),
+  };
+}
+
+function chooseMergeTemplate(analysis, option) {
+  if (option.mode === 'preserve') return option.sourceIndex;
+  if (analysis.containingIndex !== null) return analysis.containingIndex;
+  return analysis.sources[1].last >= analysis.sources[0].last ? 1 : 0;
+}
+
+function createHeatmapDatabase() {
+  const db = new SQL.Database();
+  db.run('CREATE TABLE android_metadata (locale TEXT)');
+  db.run("INSERT INTO android_metadata VALUES ('ja_JP')");
+  db.run('CREATE TABLE heatmap_table (lat INTEGER NOT NULL, lng INTEGER NOT NULL, val INTEGER, tm INTEGER, p1 INTEGER, p2 INTEGER, p3 INTEGER, p4 INTEGER, PRIMARY KEY (lat,lng))');
+  db.run('CREATE INDEX latlng ON heatmap_table (lat,lng)');
+  return db;
+}
+
+async function mergeAuxiliaryDatabases(targetZip, otherSource, mode) {
+  const otherOuter = await JSZip.loadAsync(otherSource.bytes);
+  const otherBackup = await otherOuter.file(otherSource.backupPath).async('uint8array');
+  const otherZip = await JSZip.loadAsync(otherBackup.slice(HEADER_LEN));
+  for (const spec of [
+    { path: 'title.db', table: 'title_table', combine: false },
+    { path: 'area3.db', table: 'area_table', combine: true },
+  ]) {
+    const targetEntry = targetZip.file(spec.path);
+    const otherEntry = otherZip.file(spec.path);
+    if (!otherEntry) continue;
+    if (!targetEntry) {
+      targetZip.file(spec.path, await otherEntry.async('uint8array'), {
+        binary: true, date: otherEntry.date, compression: 'DEFLATE',
+      });
+      continue;
+    }
+    const targetDb = new SQL.Database(xorDecrypt(await targetEntry.async('uint8array')));
+    const otherDb = new SQL.Database(xorDecrypt(await otherEntry.async('uint8array')));
+    try {
+      const columnsResult = targetDb.exec(`PRAGMA table_info(${spec.table})`);
+      const columns = (columnsResult[0]?.values || []).map(row => row[1]);
+      if (!columns.length) continue;
+      const rows = otherDb.exec(`SELECT ${columns.join(',')} FROM ${spec.table}`)[0]?.values || [];
+      const placeholders = columns.map(() => '?').join(',');
+      const insert = targetDb.prepare(`INSERT INTO ${spec.table}(${columns.join(',')}) VALUES(${placeholders})`);
+      const find = targetDb.prepare(`SELECT ${columns.join(',')} FROM ${spec.table} WHERE ${columns[0]}=?`);
+      const update = spec.combine
+        ? targetDb.prepare(`UPDATE ${spec.table} SET ${columns.slice(1).map(column => `${column}=?`).join(',')} WHERE ${columns[0]}=?`)
+        : null;
+      targetDb.run('BEGIN TRANSACTION');
+      try {
+        for (const row of rows) {
+          find.bind([row[0]]);
+          const exists = find.step();
+          const current = exists ? find.get() : null;
+          find.reset();
+          if (!current) {
+            insert.run(row);
+          } else if (spec.combine) {
+            const combined = row.slice(1).map((value, index) => {
+              const oldValue = current[index + 1];
+              if (typeof value !== 'number' || typeof oldValue !== 'number') return oldValue ?? value;
+              return mode === 'sum' ? oldValue + value : Math.max(oldValue, value);
+            });
+            update.run([...combined, row[0]]);
+          }
+        }
+        targetDb.run('COMMIT');
+      } catch (error) {
+        try { targetDb.run('ROLLBACK'); } catch (_) { /* no-op */ }
+        throw error;
+      } finally {
+        insert.free(); find.free(); update?.free();
+      }
+      targetZip.file(spec.path, xorDecrypt(targetDb.export()), {
+        binary: true, date: targetEntry.date, compression: 'DEFLATE',
+      });
+    } finally {
+      targetDb.close(); otherDb.close();
+    }
+  }
+}
+
+function addMergeDelta(groups, zoom, row, deltaVal, templateRow = null) {
+  if (deltaVal <= 0) return;
+  const divisor = Math.pow(2, 16 - zoom);
+  const lat = Math.floor(row.lat / divisor);
+  const lng = Math.floor(row.lng / divisor);
+  const path = `hm_${zoom}_${Math.floor(lat / 1000)}_${Math.floor(lng / 1000)}.db`;
+  if (!groups.has(path)) groups.set(path, { zoom, rows: new Map() });
+  const key = mergeRowKey(lat, lng);
+  const current = groups.get(path).rows.get(key);
+  const first = mergeRowFirst(row);
+  if (current) {
+    current.delta += deltaVal;
+    current.first = current.first && first ? Math.min(current.first, first) : current.first || first;
+    current.last = Math.max(current.last, row.tm || 0);
+  } else {
+    groups.get(path).rows.set(key, {
+      lat, lng, delta: deltaVal, first, last: row.tm || 0,
+      p2: zoom === 16 ? Math.max(0, (row.p2 || 0) - (templateRow?.p2 || 0)) : 0,
+      p3: zoom === 16 ? Math.max(0, (row.p3 || 0) - (templateRow?.p3 || 0)) : 0,
+      p4: zoom === 16 ? Math.max(0, (row.p4 || 0) - (templateRow?.p4 || 0)) : 0,
+    });
+  }
+}
+
+async function exportMergedMapping(option) {
+  if (!mergeAnalysis || mergeBusy) return;
+  mergeBusy = true;
+  const progress = $('merge-progress');
+  progress.classList.remove('hidden');
+  progress.textContent = '新しいバックアップを作成しています…';
+  try {
+    const templateIndex = chooseMergeTemplate(mergeAnalysis, option);
+    const template = mergeAnalysis.sources[templateIndex];
+    if (option.mode === 'preserve') {
+      const filename = exportFilename();
+      const output = new Blob([template.bytes], { type: 'application/octet-stream' });
+      downloadBlob(output, filename);
+      closeInfoModal();
+      await processFile(new File([output], filename, { type: 'application/octet-stream' }));
+      setStatus(`${filename} を保存し、マージ後の地図を表示しています`);
+      showToast('マージ後の地図へ切り替えました');
+      return;
+    }
+    const other = mergeAnalysis.sources[1 - templateIndex];
+    const groups = new Map();
+    let changed = 0;
+    for (const [key, otherRow] of other.cells) {
+      const templateRow = template.cells.get(key);
+      const merged = combinedMergeRow(templateRow, otherRow, option.mode);
+      const delta = merged.val - (templateRow?.val || 0);
+      if (delta <= 0) continue;
+      changed++;
+      for (let zoom = 2; zoom <= 16; zoom++) addMergeDelta(groups, zoom, merged, delta, templateRow);
+      if (changed % 10000 === 0) {
+        progress.textContent = `差分を準備しています… ${changed.toLocaleString()}セル`;
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      }
+    }
+
+    const outer = await JSZip.loadAsync(template.bytes);
+    const backupEntry = outer.file(template.backupPath);
+    const backupBytes = await backupEntry.async('uint8array');
+    const zip = await JSZip.loadAsync(backupBytes.slice(HEADER_LEN));
+    let completed = 0;
+    for (const [path, group] of groups) {
+      const entry = zip.file(path);
+      const db = entry
+        ? new SQL.Database(xorDecrypt(await entry.async('uint8array')))
+        : createHeatmapDatabase();
+      try {
+        db.run('BEGIN TRANSACTION');
+        const select = db.prepare('SELECT val,tm,p1,p2,p3,p4 FROM heatmap_table WHERE lat=? AND lng=?');
+        const update = db.prepare('UPDATE heatmap_table SET val=?,tm=?,p1=?,p2=?,p3=?,p4=? WHERE lat=? AND lng=?');
+        const insert = db.prepare('INSERT INTO heatmap_table(lat,lng,val,tm,p1,p2,p3,p4) VALUES(?,?,?,?,?,?,?,?)');
+        try {
+          for (const delta of group.rows.values()) {
+            select.bind([delta.lat, delta.lng]);
+            const exists = select.step();
+            const old = exists ? select.get() : null;
+            select.reset();
+            if (old) {
+              const val = Number(old[0]) + delta.delta;
+              const oldFirst = Number(old[2]) || Number(old[1]) || 0;
+              const first = oldFirst && delta.first ? Math.min(oldFirst, delta.first) : oldFirst || delta.first;
+              update.run([val, Math.max(Number(old[1]) || 0, delta.last), val > 1 ? first : 0,
+                (Number(old[3]) || 0) + delta.p2, (Number(old[4]) || 0) + delta.p3,
+                (Number(old[5]) || 0) + delta.p4, delta.lat, delta.lng]);
+            } else {
+              insert.run([delta.lat, delta.lng, delta.delta, delta.last, delta.delta > 1 ? delta.first : 0,
+                delta.p2, delta.p3, delta.p4]);
+            }
+          }
+        } finally { select.free(); update.free(); insert.free(); }
+        db.run('COMMIT');
+        zip.file(path, xorDecrypt(db.export()), {
+          binary: true, date: entry?.date || new Date(), compression: 'DEFLATE',
+        });
+      } catch (error) {
+        try { db.run('ROLLBACK'); } catch (_) { /* no-op */ }
+        throw error;
+      } finally { db.close(); }
+      completed++;
+      if (completed % 12 === 0) {
+        progress.textContent = `全ズームへ反映しています… ${Math.round(completed / groups.size * 100)}%`;
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      }
+    }
+    progress.textContent = '日付ごとの補助情報をまとめています…';
+    await mergeAuxiliaryDatabases(zip, other, option.mode);
+    const innerBytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+    const rebuilt = new Uint8Array(HEADER_LEN + innerBytes.length);
+    rebuilt.set(backupBytes.slice(0, HEADER_LEN));
+    rebuilt.set(innerBytes, HEADER_LEN);
+    outer.file(template.backupPath, rebuilt, { binary: true, date: backupEntry.date, compression: 'DEFLATE', createFolders: false });
+    const output = await outer.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+    const filename = exportFilename();
+    downloadBlob(output, filename);
+    closeInfoModal();
+    await processFile(new File([output], filename, { type: 'application/octet-stream' }));
+    setStatus(`${filename} を保存し、マージ後の地図を表示しています`);
+    showToast('マージ後の地図へ切り替えました');
+  } catch (error) {
+    console.error(error);
+    progress.textContent = `保存できませんでした: ${error.message}`;
+  } finally {
+    mergeBusy = false;
+  }
+}
+
+function selectMergeOption(option) {
+  if (option.mode === 'preview') {
+    startMergePreview();
+  } else {
+    exportMergedMapping(option);
+  }
+}
+
+function redrawMergePreview() {
+  if (!mergePreviewActive || !mergePreviewCtx || !map) return;
+  const canvasElement = mergePreviewCanvas;
+  mergePreviewCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+  const bounds = map.getBounds();
+  const zoom = map.getZoom();
+  const size = Math.max(2, map.getZoomScale(zoom, 16) * 3);
+  const colors = { a: 'rgba(32,164,100,.7)', b: 'rgba(142,91,217,.7)', different: 'rgba(255,138,33,.72)' };
+  for (const difference of mergeAnalysis.differences) {
+    const row = difference.row;
+    const lat = (row.lat + 0.5) / K - 90;
+    const lng = (row.lng + 0.5) / K - 180;
+    if (!bounds.contains([lat, lng])) continue;
+    const point = map.latLngToContainerPoint([lat, lng]);
+    mergePreviewCtx.fillStyle = colors[difference.kind];
+    mergePreviewCtx.fillRect(point.x - size / 2, point.y - size / 2, size, size);
+  }
+}
+
+function scheduleMergePreviewRedraw() {
+  if (!mergePreviewActive || mergePreviewFrame) return;
+  mergePreviewFrame = requestAnimationFrame(() => {
+    mergePreviewFrame = null;
+    redrawMergePreview();
+  });
+}
+
+function startMergePreview() {
+  if (!mergeAnalysis) return;
+  closeInfoModal();
+  $('upload-overlay').classList.add('hidden');
+  $('status-bar').classList.add('hidden');
+  $('edit-toolbar').classList.add('hidden');
+  canvas.style.display = 'none';
+  mergePreviewActive = true;
+  mergePreviewCanvas.classList.remove('hidden');
+  $('merge-preview-panel').classList.remove('hidden');
+  const choices = mergeOptions(mergeAnalysis).filter(option => option.mode !== 'preview');
+  const actions = $('merge-preview-actions');
+  actions.innerHTML = choices.map((option, index) => `<button type="button" data-preview-choice="${index}">${option.title}</button>`).join('');
+  actions.querySelectorAll('[data-preview-choice]').forEach(button => {
+    button.addEventListener('click', () => {
+      stopMergePreview(true);
+      exportMergedMapping(choices[Number(button.dataset.previewChoice)]);
+    });
+  });
+  const rows = mergeAnalysis.differences.map(item => item.row);
+  if (rows.length) {
+    let south = Infinity, north = -Infinity, west = Infinity, east = -Infinity;
+    for (const row of rows) {
+      south = Math.min(south, row.lat / K - 90);
+      north = Math.max(north, (row.lat + 1) / K - 90);
+      west = Math.min(west, row.lng / K - 180);
+      east = Math.max(east, (row.lng + 1) / K - 180);
+    }
+    map.fitBounds([[south, west], [north, east]], { padding: [42, 42], maxZoom: 16, animate: false });
+  }
+  redrawMergePreview();
+}
+
+function stopMergePreview(reopen = true) {
+  mergePreviewActive = false;
+  mergePreviewCanvas?.classList.add('hidden');
+  $('merge-preview-panel').classList.add('hidden');
+  canvas.style.display = '';
+  $('upload-overlay').classList.add('hidden');
+  $('status-bar').classList.remove('hidden');
+  $('edit-toolbar').classList.remove('hidden');
+  if (reopen) openInfoModal('merge', $('merge-open'));
+}
+
 // ========================= ファイル処理 =========================
 
 async function processFile(file) {
@@ -1473,6 +2036,7 @@ async function processFile(file) {
   try {
     const buf = await file.arrayBuffer();
     sourceFileBytes = buf.slice(0);
+    sourceFileName = file.name || '';
     setProgress(20);
 
     const outer = await JSZip.loadAsync(buf);
@@ -1542,6 +2106,11 @@ async function init() {
   canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:400;';
   container.appendChild(canvas);
   ctx = canvas.getContext('2d');
+  mergePreviewCanvas = document.createElement('canvas');
+  mergePreviewCanvas.className = 'hidden';
+  mergePreviewCanvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:410;';
+  container.appendChild(mergePreviewCanvas);
+  mergePreviewCtx = mergePreviewCanvas.getContext('2d');
 
   // 消しゴム選択中だけ Canvas がポインター入力を受け取る。
   let lastBrushPoint = null;
@@ -1592,6 +2161,7 @@ async function init() {
   let rafId = null;
 
   map.on('move', () => {
+    if (mergePreviewActive) scheduleMergePreviewRedraw();
     if (isZooming) return;        // ズームアニメーション中はスキップ
     if (rankingPanSync) {
       const point = map.latLngToContainerPoint(rankingPanSync.anchor);
@@ -1615,6 +2185,7 @@ async function init() {
     void canvas.offsetWidth;
     canvas.style.transition = '';
     scheduleUpdate();  // 不足タイルの非同期ロード
+    if (mergePreviewActive) redrawMergePreview();
   });
 
   // 通常モードでセルをクリックすると、そのセルに保存された訪問情報を表示する。
@@ -1690,6 +2261,7 @@ async function init() {
       showToast(`Zoom ${MIN_EDIT_ZOOM}未満では編集できないため、移動に戻しました`);
     }
     updateEditUI();
+    if (mergePreviewActive) redrawMergePreview();
     // 不足タイルの読込は後続の moveend で debounce して開始する。
   });
 
@@ -1697,7 +2269,10 @@ async function init() {
   new ResizeObserver(() => {
     canvas.width  = container.offsetWidth;
     canvas.height = container.offsetHeight;
+    mergePreviewCanvas.width = container.offsetWidth;
+    mergePreviewCanvas.height = container.offsetHeight;
     redraw();
+    redrawMergePreview();
     positionCellInfo();
   }).observe(container);
 
@@ -1713,6 +2288,17 @@ async function init() {
 
   // ファイル選択
   const fileInput = $('file-input');
+  const returnToHome = () => {
+    setToolbarMenuOpen(false);
+    resetEdits();
+    resetInsights();
+    $('edit-toolbar').classList.add('hidden');
+    $('status-bar').classList.add('hidden');
+    $('upload-overlay').classList.remove('hidden');
+    sourceFileBytes = null;
+    sourceFileName = '';
+    fileInput.value = '';
+  };
 
   $('cell-popup-close').addEventListener('click', closeCellInfo);
   $('insights-btn').addEventListener('click', () => {
@@ -1729,9 +2315,14 @@ async function init() {
   $('date-filter-clear').addEventListener('click', clearDateFilter);
   document.addEventListener('pointerdown', event => {
     const panel = $('date-filter-panel');
-    if (panel.classList.contains('hidden')) return;
-    if (!panel.contains(event.target) && !$('date-filter-btn').contains(event.target)) {
+    if (!panel.classList.contains('hidden') &&
+        !panel.contains(event.target) && !$('date-filter-btn').contains(event.target)) {
       setDateFilterPanelOpen(false);
+    }
+    const toolbarMenu = $('toolbar-overflow-menu');
+    if (!toolbarMenu.classList.contains('hidden') &&
+        !toolbarMenu.contains(event.target) && !$('toolbar-menu-btn').contains(event.target)) {
+      setToolbarMenuOpen(false);
     }
   });
 
@@ -1763,6 +2354,43 @@ async function init() {
     if (e.target.files[0]) processFile(e.target.files[0]);
   });
 
+  $('merge-open').addEventListener('click', event => openMergeModal(event.currentTarget));
+  $('menu-merge').addEventListener('click', event => openMergeModal(event.currentTarget));
+  $('toolbar-menu-btn').addEventListener('click', () => {
+    setToolbarMenuOpen($('toolbar-overflow-menu').classList.contains('hidden'));
+  });
+  $('menu-insights').addEventListener('click', () => {
+    setToolbarMenuOpen(false);
+    setInsightsPanelOpen(true);
+  });
+  $('menu-eraser').addEventListener('click', () => {
+    setToolbarMenuOpen(false);
+    setEraserActive(!eraserActive);
+  });
+  $('menu-usage').addEventListener('click', event => {
+    setToolbarMenuOpen(false);
+    openInfoModal('usage', event.currentTarget);
+  });
+  $('menu-about').addEventListener('click', event => {
+    setToolbarMenuOpen(false);
+    openInfoModal('about', event.currentTarget);
+  });
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 900) setToolbarMenuOpen(false);
+  });
+  const mergeInput = $('merge-file-b');
+  $('merge-file-b-button').addEventListener('click', () => mergeInput.click());
+  mergeInput.addEventListener('change', () => {
+    mergeFiles[1] = mergeInput.files[0] || null;
+    $('merge-file-b-name').textContent = mergeFiles[1]?.name || '未選択';
+    mergeAnalysis = null;
+    $('merge-result').classList.add('hidden');
+    $('merge-progress').classList.add('hidden');
+    $('merge-analyze').disabled = !(mergeFiles[0] && mergeFiles[1]) || mergeBusy;
+  });
+  $('merge-analyze').addEventListener('click', analyzeSelectedMergeFiles);
+  $('merge-preview-back').addEventListener('click', () => stopMergePreview(true));
+
   // ドラッグ＆ドロップ
   const card    = $('upload-card');
   const overlay = $('upload-overlay');
@@ -1780,6 +2408,12 @@ async function init() {
   $('redo-btn').addEventListener('click', redoEdit);
   $('save-btn').addEventListener('click', exportEditedMapping);
   document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !$('toolbar-overflow-menu').classList.contains('hidden')) {
+      event.preventDefault();
+      setToolbarMenuOpen(false);
+      $('toolbar-menu-btn').focus();
+      return;
+    }
     if (event.key === 'Escape' && !$('insights-panel').classList.contains('hidden')) {
       event.preventDefault();
       setInsightsPanelOpen(false);
@@ -1814,13 +2448,8 @@ async function init() {
     }
   });
 
-  $('reload-btn').addEventListener('click', () => {
-    resetEdits();
-    resetInsights();
-    $('edit-toolbar').classList.add('hidden');
-    $('upload-overlay').classList.remove('hidden');
-    fileInput.value = '';
-  });
+  $('reload-btn').addEventListener('click', returnToHome);
+  $('menu-reload').addEventListener('click', returnToHome);
 
 }
 

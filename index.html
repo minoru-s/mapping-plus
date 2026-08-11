@@ -21,6 +21,7 @@
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
     [hidden] { display: none !important; }
+    .hidden { display: none !important; }
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue',
@@ -334,11 +335,11 @@
       position: fixed;
       top: 14px;
       left: 50%;
-      z-index: 900;
+      z-index: 1100;
       display: flex;
       align-items: center;
       gap: 6px;
-      width: min(650px, calc(100vw - 28px));
+      width: min(940px, calc(100vw - 28px));
       max-width: calc(100vw - 28px);
       padding: 6px;
       transform: translateX(-50%);
@@ -352,6 +353,7 @@
     }
     #edit-toolbar.hidden { display: none; }
     .tool-button {
+      flex: 0 0 auto;
       height: 32px;
       min-width: 32px;
       padding: 0 10px;
@@ -392,8 +394,8 @@
     .history-button:not(:disabled):hover svg { color: #0071e3; }
     .toolbar-divider { width: 1px; height: 22px; background: rgba(60,60,67,.16); margin: 0 2px; }
     #edit-summary {
-      flex: 1 1 auto;
-      min-width: 0;
+      min-width: 200px;
+      flex: 1 1 200px;
       padding: 0 8px;
       overflow: hidden;
       color: #6e6e73;
@@ -411,6 +413,47 @@
       background: linear-gradient(180deg,#168cff,#0071e3);
     }
     #save-btn:disabled { color: #6e6e73; border-color: rgba(60,60,67,.15); background: rgba(235,235,240,.75); }
+    .toolbar-file-action { flex: 0 0 auto; }
+    .toolbar-menu-wrap { position: relative; flex: 0 0 auto; order: -100; }
+    #toolbar-menu-btn { display: none; width: 34px; min-width: 34px; padding: 0; }
+    #toolbar-menu-btn svg { width: 18px; height: 18px; }
+    #toolbar-overflow-menu {
+      position: absolute;
+      top: 39px;
+      left: 0;
+      z-index: 950;
+      width: 220px;
+      padding: 6px;
+      border: 1px solid rgba(255,255,255,.94);
+      border-radius: 12px;
+      background: linear-gradient(145deg, rgba(255,255,255,.96), rgba(242,247,252,.91));
+      box-shadow: 0 14px 38px rgba(31,48,70,.24), inset 0 1px 0 #fff;
+      backdrop-filter: blur(22px) saturate(180%);
+      -webkit-backdrop-filter: blur(22px) saturate(180%);
+    }
+    .toolbar-menu-item {
+      width: 100%;
+      min-height: 36px;
+      padding: 7px 10px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: #1d1d1f;
+      font: inherit;
+      font-size: 12px;
+      text-align: left;
+      cursor: pointer;
+    }
+    .toolbar-menu-item:hover { background: rgba(0,122,255,.09); }
+    .toolbar-menu-item.active { background: #0071e3; color: #fff; }
+    .toolbar-menu-item:disabled { opacity: .4; cursor: default; }
+    .toolbar-menu-item svg { width: 17px; height: 17px; flex: 0 0 auto; }
+    .toolbar-menu-separator { height: 1px; margin: 5px 7px; background: rgba(60,60,67,.12); }
+    .menu-insights-item { display: none; }
+    .menu-eraser-item { display: none; }
 
     /* ---- 期間絞り込み ---- */
     #date-filter-panel {
@@ -953,29 +996,147 @@
       color: #fff;
       font: inherit;
       font-size: 13px;
+      font-weight: 600;
       cursor: pointer;
+      box-shadow: 0 2px 7px rgba(0,113,227,.18), inset 0 1px 0 rgba(255,255,255,.28);
+      transition: background-color .14s ease, box-shadow .14s ease, transform .14s ease;
     }
-
-    #reload-btn {
-      min-height: 24px;
-      padding: 2px 10px;
-      background: rgba(255, 255, 255, 0.72);
-      border: 1px solid rgba(60, 60, 67, 0.22);
+    .modal-primary-button:not(:disabled):hover { background: linear-gradient(180deg,#2998ff,#0878e8); box-shadow: 0 4px 12px rgba(0,113,227,.24), inset 0 1px 0 rgba(255,255,255,.3); }
+    .modal-primary-button:not(:disabled):active { transform: translateY(1px); }
+    .modal-primary-button:disabled {
+      border-color: rgba(60,60,67,.12);
+      background: rgba(118,118,128,.1);
+      color: #9a9aa0;
+      box-shadow: none;
+      cursor: default;
+    }
+    .modal-primary-button:focus-visible,
+    .merge-file-picker button:focus-visible,
+    .merge-option:focus-visible,
+    #merge-preview-back:focus-visible,
+    .merge-preview-actions button:focus-visible {
+      outline: 3px solid rgba(0,122,255,.25);
+      outline-offset: 2px;
+    }
+    .merge-intro { margin-bottom: 16px; }
+    .merge-file-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .merge-file-picker {
+      min-width: 0;
+      padding: 15px;
+      border: 1px solid rgba(60,60,67,.14);
+      border-radius: 12px;
+      background: rgba(118,118,128,.05);
+    }
+    .merge-file-picker strong { display: block; margin-bottom: 8px; font-size: 12px; }
+    .merge-file-picker button {
+      min-height: 32px;
+      padding: 5px 11px;
+      border: 1px solid rgba(60,60,67,.18);
+      border-radius: 8px;
+      background: #fff;
       color: #1d1d1f;
-      border-radius: 6px;
-      box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 550;
+      cursor: pointer;
+      transition: background-color .14s ease, border-color .14s ease;
+    }
+    .merge-file-picker button:hover { border-color: rgba(0,122,255,.3); background: #fafdff; }
+    .merge-file-name {
+      display: block;
+      min-height: 16px;
+      margin-top: 9px;
+      overflow: hidden;
+      color: #6e6e73;
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #merge-analyze { margin-top: 14px; }
+    #merge-progress { margin: 14px 0 2px; color: #6e6e73; font-size: 12px; text-align: center; }
+    .merge-result {
+      margin-top: 20px;
+      padding: 16px;
+      border: 1px solid rgba(0,122,255,.18);
+      border-radius: 12px;
+      background: rgba(0,122,255,.055);
+    }
+    .merge-result h3 { margin: 0 0 8px; font-size: 14px; line-height: 1.45; }
+    .merge-result > p { color: #55555a; line-height: 1.55; }
+    .merge-periods { display: grid; gap: 7px; margin: 15px 0; }
+    .merge-period-row { display: grid; grid-template-columns: 24px 1fr; gap: 8px; align-items: center; }
+    .merge-period-label { font-weight: 700; text-align: center; }
+    .merge-period-track { position: relative; height: 7px; border-radius: 99px; background: rgba(60,60,67,.1); }
+    .merge-period-bar { position: absolute; top: 0; height: 100%; min-width: 4px; border-radius: 99px; background: #007aff; }
+    .merge-period-row:nth-child(2) .merge-period-bar { background: #8e5bd9; }
+    .merge-period-date { grid-column: 2; margin-top: -4px; color: #6e6e73; font-size: 10px; }
+    .merge-options { display: grid; gap: 8px; margin-top: 15px; }
+    .merge-option {
+      padding: 11px 12px;
+      border: 1px solid rgba(60,60,67,.14);
+      border-radius: 10px;
+      background: rgba(255,255,255,.76);
+      color: #1d1d1f;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      line-height: 1.45;
+      transition: background-color .14s ease, border-color .14s ease, box-shadow .14s ease;
+    }
+    .merge-option:hover { border-color: rgba(0,122,255,.35); background: #fff; box-shadow: 0 3px 10px rgba(35,55,80,.08); }
+    .merge-option strong { display: block; }
+    .merge-option span { display: block; margin-top: 2px; color: #6e6e73; font-size: 11px; }
+    #merge-preview-panel {
+      position: fixed;
+      left: 50%;
+      bottom: 54px;
+      z-index: 1300;
+      width: min(620px, calc(100vw - 24px));
+      padding: 16px;
+      border: 1px solid rgba(255,255,255,.9);
+      border-radius: 15px;
+      background: rgba(250,252,255,.88);
+      box-shadow: 0 18px 48px rgba(31,45,64,.24);
+      backdrop-filter: blur(22px) saturate(180%);
+      transform: translateX(-50%);
+    }
+    .merge-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .merge-preview-head strong { font-size: 14px; }
+    #merge-preview-back {
+      min-height: 30px;
+      padding: 4px 10px 4px 8px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      border: 1px solid rgba(60,60,67,.16);
+      border-radius: 8px;
+      background: rgba(255,255,255,.76);
+      color: #3a3a3c;
       font: inherit;
       font-size: 11px;
+      font-weight: 550;
       cursor: pointer;
-      transition: background-color 0.12s ease, border-color 0.12s ease;
+      transition: background-color .14s ease, border-color .14s ease;
     }
-    #reload-btn:hover {
-      background: #fff;
-      border-color: rgba(60, 60, 67, 0.32);
+    #merge-preview-back:hover { border-color: rgba(0,122,255,.3); background: #fff; color: #0066cc; }
+    #merge-preview-back svg { width: 14px; height: 14px; }
+    .merge-preview-legend { display: flex; flex-wrap: wrap; gap: 11px; margin: 11px 0 13px; color: #55555a; font-size: 11px; }
+    .merge-preview-legend span::before { content: ''; display: inline-block; width: 9px; height: 9px; margin-right: 4px; border-radius: 3px; background: var(--swatch); }
+    .merge-preview-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+    .merge-preview-actions button { flex: 1 1 145px; min-height: 34px; padding: 5px 9px; border: 1px solid rgba(60,60,67,.16); border-radius: 8px; background: rgba(255,255,255,.82); color: #1d1d1f; font: inherit; font-size: 11px; font-weight: 550; cursor: pointer; transition: background-color .14s ease, border-color .14s ease; }
+    .merge-preview-actions button:hover { border-color: rgba(0,122,255,.3); background: #fff; }
+
+    @media (max-width: 900px) {
+      .toolbar-file-action { display: none; }
+      #toolbar-menu-btn { display: inline-flex; }
+      .leaflet-top.leaflet-left { top: 58px; }
     }
-    #reload-btn:focus-visible {
-      outline: 3px solid rgba(0, 122, 255, 0.24);
-      outline-offset: 1px;
+
+    @media (max-width: 720px) {
+      #insights-btn { display: none; }
+      #eraser-btn { display: none; }
+      .menu-insights-item { display: flex; }
+      .menu-eraser-item { display: flex; }
     }
 
     @media (max-width: 560px) {
@@ -1008,6 +1169,7 @@
         border-radius: 15px;
       }
       #modal-body { padding: 18px; }
+      .merge-file-grid { grid-template-columns: 1fr; }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -1041,6 +1203,14 @@
     </svg>
     <span class="tool-label">統計</span>
   </button>
+  <button id="merge-open" class="tool-button toolbar-file-action" title="現在のバックアップに別のバックアップを追加する">
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M4 4.5h5M15 4.5h5v5M20 14.5v5h-5M9 19.5H4v-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span>マージ</span>
+  </button>
+  <button id="reload-btn" class="tool-button toolbar-file-action" title="別のバックアップを開く">
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7.5h6l2 2h8v9a1.5 1.5 0 01-1.5 1.5h-13A1.5 1.5 0 014 18.5v-11z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4 9.5h16" stroke="currentColor" stroke-width="1.5"/></svg>
+    <span>別のファイル</span>
+  </button>
   <div class="toolbar-divider"></div>
   <button id="undo-btn" class="tool-button history-button" title="取り消す（⌘Z）" aria-label="取り消す" disabled>
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -1056,6 +1226,34 @@
   </button>
   <span id="edit-summary">編集なし · Zoom 14</span>
   <button id="save-btn" class="tool-button" disabled>編集済みファイルを保存</button>
+  <div class="toolbar-menu-wrap">
+    <button id="toolbar-menu-btn" class="tool-button" type="button" aria-label="その他のメニュー" aria-expanded="false" aria-controls="toolbar-overflow-menu">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    </button>
+    <div id="toolbar-overflow-menu" class="hidden" role="menu">
+      <button id="menu-eraser" class="toolbar-menu-item menu-eraser-item" type="button" role="menuitem">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4.5 15.5l8.7-8.7a2.2 2.2 0 013.1 0l2.9 2.9a2.2 2.2 0 010 3.1l-6.7 6.7H8.5l-4-4z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M10 19.5h9.5M8.2 11.8l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        消しゴム
+      </button>
+      <div class="toolbar-menu-separator menu-eraser-item"></div>
+      <button id="menu-insights" class="toolbar-menu-item menu-insights-item" type="button" role="menuitem">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 19V11M12 19V5M19 19v-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M3.5 19.5h17" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        ランキングと全体統計
+      </button>
+      <div class="toolbar-menu-separator menu-insights-item"></div>
+      <button id="menu-merge" class="toolbar-menu-item" type="button" role="menuitem">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M4 4.5h5M15 4.5h5v5M20 14.5v5h-5M9 19.5H4v-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        現在のファイルにマージ
+      </button>
+      <button id="menu-reload" class="toolbar-menu-item" type="button" role="menuitem">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7.5h6l2 2h8v9a1.5 1.5 0 01-1.5 1.5h-13A1.5 1.5 0 014 18.5v-11z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4 9.5h16" stroke="currentColor" stroke-width="1.5"/></svg>
+        別のファイルを開く
+      </button>
+      <div class="toolbar-menu-separator"></div>
+      <button id="menu-usage" class="toolbar-menu-item" type="button" role="menuitem">使い方</button>
+      <button id="menu-about" class="toolbar-menu-item" type="button" role="menuitem">このツールについて</button>
+    </div>
+  </div>
 </div>
 <section id="date-filter-panel" class="hidden" aria-label="表示期間の絞り込み" hidden>
   <div class="date-filter-fields">
@@ -1166,7 +1364,6 @@
   <span id="point-count"></span>
   <button class="info-button" data-modal-target="usage">使い方</button>
   <button class="info-button" data-modal-target="about">このツールについて</button>
-  <button id="reload-btn">別ファイル</button>
 </div>
 
 <!-- 共通情報モーダル -->
@@ -1184,6 +1381,7 @@
           <li><strong>ランキングと全体統計を見る</strong><br>ツールバーの「統計」から、訪問回数の多いセル、訪問済みセル数、埋めた面積などを確認できます。ランキングの項目を押すと、そのセルへ移動します。</li>
           <li><strong>不要な記録を消す</strong><br>Zoom 10以上まで拡大して「消しゴム」を選び、軌跡上をドラッグします。精密に消す場合はZoom 16を推奨します。</li>
           <li><strong>確認して保存する</strong><br>Undo／Redoで調整し、「編集済みファイルを保存」を押します。ファイル名は保存時刻の <strong>YYYYMMDD-HHmmss.mapping</strong> になります。</li>
+          <li><strong>2つのバックアップをまとめる</strong><br>最初のファイルを地図で開いたあと、上部ツールバーの「マージ」から追加するファイルを選びます。画面幅が狭い場合は左端のメニュー内にあります。完了後は新しい.mappingファイルを保存し、マージ後の地図へ自動で切り替わります。「重複を増やさずまとめる」は同じセルの回数に大きい方を採用し、「両方の回数を足す」は独立した端末で記録した場合に使います。</li>
         </ol>
         <h3>元データについて</h3>
         <p>読み込んだ元ファイルを上書き・削除する処理はありません。編集結果は必ず別の.mappingファイルとしてダウンロードされます。念のため、動作確認が済むまでは元ファイルも保管してください。</p>
@@ -1200,6 +1398,18 @@
         <h3>アップデート履歴</h3>
         <div class="update-history">
           <article class="update-entry latest">
+            <div class="update-entry-header">
+              <span class="version-chip">v1.3.0</span>
+              <time datetime="2026-08-11">2026年8月11日</time>
+            </div>
+            <div class="update-entry-title">バックアップのマージに対応</div>
+            <ul>
+              <li>2つの.mappingファイルを、記録期間とセルの違いを確認しながら一本化できるようになりました。</li>
+              <li>判断が必要な違いは、地図上で色分けして確認できます。</li>
+              <li>元ファイルは変更せず、結果を新しい.mappingファイルとして保存します。</li>
+            </ul>
+          </article>
+          <article class="update-entry">
             <div class="update-entry-header">
               <span class="version-chip">v1.2.0</span>
               <time datetime="2026-08-01">2026年8月1日</time>
@@ -1248,9 +1458,26 @@
         <div class="notice-box">スマートフォンでも閲覧できる場合がありますが、消しゴムによる範囲選択やファイルの保存は端末・ブラウザによって正しく動作しない可能性があります。編集作業にはパソコンをご利用ください。</div>
         <button class="modal-primary-button" data-modal-close>このまま閲覧する</button>
       </div>
+
+      <div id="modal-merge" class="modal-content hidden" data-title="2つのバックアップをまとめる">
+        <p class="merge-intro">現在表示しているバックアップに、もう1つのバックアップを追加します。記録期間とセルの違いを調べ、判断が必要な場合だけ選択肢を表示します。</p>
+        <div class="merge-file-grid">
+          <div class="merge-file-picker"><strong>現在のファイル</strong><span id="merge-file-a-name" class="merge-file-name">—</span></div>
+          <div class="merge-file-picker"><strong>追加するファイル</strong><button id="merge-file-b-button" type="button">ファイルを選択…</button><span id="merge-file-b-name" class="merge-file-name">未選択</span><input id="merge-file-b" type="file" accept=".mapping" hidden></div>
+        </div>
+        <button id="merge-analyze" class="modal-primary-button" type="button" disabled>違いを調べる</button>
+        <p id="merge-progress" role="status" class="hidden"></p>
+        <div id="merge-result" class="merge-result hidden"></div>
+      </div>
     </div>
   </section>
 </div>
+
+<section id="merge-preview-panel" class="hidden" aria-label="バックアップの違い">
+  <div class="merge-preview-head"><strong>地図上の違い</strong><button id="merge-preview-back" type="button"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m9.5 3.5-4.5 4.5 4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><span>選択画面へ戻る</span></button></div>
+  <div class="merge-preview-legend"><span style="--swatch:#20a464">Aだけ</span><span style="--swatch:#8e5bd9">Bだけ</span><span style="--swatch:#ff8a21">両方にあるが回数が違う</span></div>
+  <div id="merge-preview-actions" class="merge-preview-actions"></div>
+</section>
 
 <!-- ライブラリ -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
