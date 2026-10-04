@@ -330,6 +330,31 @@
       color: #6e6e73;
     }
 
+    /* ---- 背景地図の切替（同じコントロールをツールバー／メニューへ移動） ---- */
+    #basemap-control {
+      flex: 0 0 208px;
+      width: 208px;
+      color: #3a3a3c;
+      font-size: 12px;
+    }
+    #basemap-toolbar-slot { display: contents; }
+    #basemap-menu-slot, .menu-basemap-separator { display: none; }
+    .basemap-row { display: flex; align-items: center; gap: 6px; }
+    .basemap-row label { flex: 0 0 auto; white-space: nowrap; }
+    #basemap-select {
+      width: 154px;
+      height: 32px;
+      padding: 0 6px;
+      border: 1px solid rgba(60,60,67,.16);
+      border-radius: 7px;
+      background: rgba(255,255,255,.8);
+      color: #1d1d1f;
+      font: inherit;
+      cursor: pointer;
+    }
+    #basemap-select:focus-visible { outline: 3px solid rgba(0,122,255,.24); outline-offset: 2px; }
+    #basemap-hint { display: none; margin: 6px 0 0; font-size: 10px; color: #6e6e73; line-height: 1.5; }
+
     /* ---- 編集ツールバー ---- */
     #edit-toolbar {
       position: fixed;
@@ -339,7 +364,7 @@
       display: flex;
       align-items: center;
       gap: 6px;
-      width: min(940px, calc(100vw - 28px));
+      width: min(1160px, calc(100vw - 28px));
       max-width: calc(100vw - 28px);
       padding: 6px;
       transform: translateX(-50%);
@@ -423,6 +448,8 @@
       left: 0;
       z-index: 950;
       width: 220px;
+      max-height: calc(100dvh - 110px);
+      overflow-y: auto;
       padding: 6px;
       border: 1px solid rgba(255,255,255,.94);
       border-radius: 12px;
@@ -1126,10 +1153,23 @@
     .merge-preview-actions button { flex: 1 1 145px; min-height: 34px; padding: 5px 9px; border: 1px solid rgba(60,60,67,.16); border-radius: 8px; background: rgba(255,255,255,.82); color: #1d1d1f; font: inherit; font-size: 11px; font-weight: 550; cursor: pointer; transition: background-color .14s ease, border-color .14s ease; }
     .merge-preview-actions button:hover { border-color: rgba(0,122,255,.3); background: #fff; }
 
+    @media (max-width: 1260px) {
+      .leaflet-top.leaflet-left { top: 58px; }
+    }
+
+    @media (max-width: 1200px) {
+      #edit-toolbar { width: min(940px, calc(100vw - 28px)); }
+      #toolbar-menu-btn { display: inline-flex; }
+      #basemap-menu-slot, .menu-basemap-separator { display: block; }
+      #basemap-control { width: 100%; padding: 7px 10px; }
+      .basemap-row { display: block; }
+      .basemap-row label { display: block; margin-bottom: 6px; }
+      #basemap-select { width: 100%; }
+      #basemap-hint:not([hidden]) { display: block; }
+    }
+
     @media (max-width: 900px) {
       .toolbar-file-action { display: none; }
-      #toolbar-menu-btn { display: inline-flex; }
-      .leaflet-top.leaflet-left { top: 58px; }
     }
 
     @media (max-width: 720px) {
@@ -1203,6 +1243,18 @@
     </svg>
     <span class="tool-label">統計</span>
   </button>
+  <div id="basemap-toolbar-slot">
+    <div id="basemap-control" aria-label="背景地図の切替">
+      <div class="basemap-row">
+        <label for="basemap-select">背景地図</label>
+        <select id="basemap-select" aria-describedby="basemap-hint" title="背景地図を変更（GPSの表示色・編集内容は変わりません）">
+          <option value="soft">淡色（標準）</option>
+          <option value="gsi">地理院の淡色地図</option>
+        </select>
+      </div>
+      <p id="basemap-hint" hidden>日本向け。海外の詳細表示には「淡色（標準）」を使用。</p>
+    </div>
+  </div>
   <button id="merge-open" class="tool-button toolbar-file-action" title="現在のバックアップに別のバックアップを追加する">
     <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M4 4.5h5M15 4.5h5v5M20 14.5v5h-5M9 19.5H4v-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
     <span>マージ</span>
@@ -1241,6 +1293,8 @@
         ランキングと全体統計
       </button>
       <div class="toolbar-menu-separator menu-insights-item"></div>
+      <div id="basemap-menu-slot" role="group" aria-label="背景地図の切替"></div>
+      <div class="toolbar-menu-separator menu-basemap-separator"></div>
       <button id="menu-merge" class="toolbar-menu-item" type="button" role="menuitem">
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M4 4.5h5M15 4.5h5v5M20 14.5v5h-5M9 19.5H4v-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         現在のファイルにマージ
@@ -1378,6 +1432,7 @@
         <ol>
           <li><strong>.mappingファイルを開く</strong><br>ファイルを選択するか、ホーム画面へドラッグ＆ドロップします。</li>
           <li><strong>地図を見る・移動する</strong><br>通常時はドラッグで移動し、ホイールやトラックパッドで拡大・縮小できます。色の付いたセルをクリックすると、記録回数と初回・最終訪問日時を確認できます。</li>
+          <li><strong>背景地図を切り替える</strong><br>上部ツールバーの「背景地図」から、軌跡が見やすい「淡色（標準）」と「地理院の淡色地図」を選べます。画面幅が狭い場合は左端のメニュー内にあります。切替でGPS記録や編集内容は変わりません。選択はこのブラウザに保存されます。地理院の詳細地図は日本向けです。</li>
           <li><strong>ランキングと全体統計を見る</strong><br>ツールバーの「統計」から、訪問回数の多いセル、訪問済みセル数、埋めた面積などを確認できます。ランキングの項目を押すと、そのセルへ移動します。</li>
           <li><strong>不要な記録を消す</strong><br>Zoom 10以上まで拡大して「消しゴム」を選び、軌跡上をドラッグします。精密に消す場合はZoom 16を推奨します。</li>
           <li><strong>確認して保存する</strong><br>Undo／Redoで調整し、「編集済みファイルを保存」を押します。ファイル名は保存時刻の <strong>YYYYMMDD-HHmmss.mapping</strong> になります。</li>
@@ -1388,7 +1443,7 @@
         <h3>消しゴムの挙動</h3>
         <p>記録は内部の最小セル（Zoom 16ではおよそ20m四方）単位で削除されます。同じセルに複数回の記録がある場合、そのセル内の記録はまとめて削除されます。Zoom 10〜12では一度に広い範囲を消しやすいため、細かな修正は十分に拡大して行ってください。</p>
         <h3>データの処理</h3>
-        <p><strong>.mappingファイルとGPS記録はブラウザ内で処理され、サーバーへアップロードされません。</strong> 背景地図の表示には、インターネット経由でCARTO／OpenStreetMapの地図タイルを取得します。</p>
+        <p><strong>.mappingファイルとGPS記録はブラウザ内で処理され、サーバーへアップロードされません。</strong> 背景地図の表示には、選択した地図に応じてOpenStreetMapまたは国土地理院の地図タイルを取得します。APIキーや有料サービスの契約は不要です。</p>
         <p><strong>ランキングの都道府県・市区町村名の判定と、市区町村との面積比較には、本ツールに同梱したデータを使用します。</strong> GPS座標を外部の逆ジオコーディングAPIへ問い合わせることはありません。</p>
         <p>利用状況の把握にはGoogle Analyticsを使用しており、ページの閲覧情報がGoogleへ送信される場合があります。.mappingファイルやGPS記録がAnalyticsを通じて送信されることはありません。</p>
       </div>
@@ -1398,6 +1453,18 @@
         <h3>アップデート履歴</h3>
         <div class="update-history">
           <article class="update-entry latest">
+            <div class="update-entry-header">
+              <span class="version-chip">v1.3.1</span>
+              <time datetime="2026-10-05">2026年10月5日</time>
+            </div>
+            <div class="update-entry-title">背景地図の表示不具合を修正</div>
+            <ul>
+              <li>APIキーが要求される画像が表示されてしまう問題に対応し、背景を淡色化したOpenStreetMapに変更しました。</li>
+              <li>上部ツールバー（狭い画面では左端のメニュー）から国土地理院の淡色地図にも切り替えられます。GPSの表示色や編集内容はそのままです。</li>
+              <li>背景地図を読み込めない場合に、通信状態の確認を案内するようになりました。</li>
+            </ul>
+          </article>
+          <article class="update-entry">
             <div class="update-entry-header">
               <span class="version-chip">v1.3.0</span>
               <time datetime="2026-08-11">2026年8月11日</time>
@@ -1447,7 +1514,9 @@
         <p>アプリ側のバックアップ形式が将来変更された場合、正常に読み書きできなくなる可能性があります。</p>
         <h3>位置情報の処理</h3>
         <p><strong>.mappingファイル、GPS記録、ランキングに表示する位置は、すべてブラウザ内で処理されます。</strong> 都道府県・市区町村名は同梱した行政区域データから判定し、GPS座標を外部の逆ジオコーディングAPIへ送信することはありません。</p>
-        <p>背景地図の表示ではCARTO／OpenStreetMapの地図タイルを、ページ利用状況の把握ではGoogle Analyticsを使用しますが、.mappingファイルやGPS記録そのものを送信する処理はありません。</p>
+        <p>背景地図の表示ではOpenStreetMapまたは国土地理院の地図タイルを、ページ利用状況の把握ではGoogle Analyticsを使用しますが、.mappingファイルやGPS記録そのものを送信する処理はありません。</p>
+        <h3>地理院地図の出典</h3>
+        <p>背景を切り替えた場合は、国土地理院の「淡色地図」を使用します。小縮尺の海岸線データの出典：<br><small lang="en">Shoreline data is derived from: United States. National Imagery and Mapping Agency. "Vector Map Level 0 (VMAP0)." Bethesda, MD: Denver, CO: The Agency; USGS Information Services, 1997.</small></p>
         <h3>開発者情報</h3>
         <p><strong>製作者:</strong> 西藤 実（中央大学國井研究室→東京科学大学長谷川研究室）</p>
         <p><strong>リポジトリ:</strong> <a href="https://github.com/minoru-s/mapping-plus" target="_blank" rel="noopener noreferrer">GitHub</a></p>

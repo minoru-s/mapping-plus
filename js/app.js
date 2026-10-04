@@ -11,6 +11,23 @@ const CELL_POPUP_ARROW_WIDTH = 20;
 const CELL_POPUP_ARROW_HEIGHT = 10;
 const EARTH_RADIUS_M = 6371008.8;
 const RANKING_LIMIT = 30;
+const BACKGROUND_STYLE_KEY = 'mapping-plus-background-style';
+const BACKGROUND_STYLES = Object.freeze({
+  soft: {
+    url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    maxNativeZoom: 19,
+    minNativeZoom: 0,
+    filter: 'saturate(0.25) contrast(0.65) brightness(1.22)',
+  },
+  gsi: {
+    url: 'https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png',
+    attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html">地理院タイル</a> · Shoreline: <a href="https://maps.gsi.go.jp/development/ichiran.html#pale">VMAP0</a>',
+    maxNativeZoom: 18,
+    minNativeZoom: 2,
+    filter: '',
+  },
+});
 
 // マップズーム → アプリ内ズームレベル（低いほどタイルが少ない）
 function getAppZoom(mapZoom) {
@@ -37,6 +54,8 @@ let tileCache = new Map();    // 'appZoom_A_B' -> [{lat_i, lng_i, val}]
 let loadingTasks = new Map(); // 同じタイルの並行読込は同一 Promise を共有
 let totalCells = 0;
 let map = null;
+let backgroundLayer = null;
+let backgroundStyle = 'soft';
 let canvas = null;
 let ctx = null;
 let updateTimer = null;
@@ -75,7 +94,7 @@ let mergePreviewCanvas = null;
 let mergePreviewCtx = null;
 let mergePreviewFrame = null;
 
-const CURRENT_VERSION = '1.3.0';
+const CURRENT_VERSION = '1.3.1';
 const UPDATE_SEEN_KEY = `mapping-plus-update-seen-${CURRENT_VERSION}`;
 
 // ========================= XOR 復号 =========================
@@ -2084,6 +2103,65 @@ async function processFile(file) {
 
 // ========================= 初期化 =========================
 
+function readBackgroundStyle() {
+  try {
+    const saved = localStorage.getItem(BACKGROUND_STYLE_KEY);
+    return Object.hasOwn(BACKGROUND_STYLES, saved) ? saved : 'soft';
+  } catch (_) {
+    return 'soft';
+  }
+}
+
+function positionBackgroundControl() {
+  const control = $('basemap-control');
+  const slot = $(window.innerWidth <= 1200 ? 'basemap-menu-slot' : 'basemap-toolbar-slot');
+  // 選択欄を複製せずに移動するので、選択・イベント・アクセシブルなラベルは共通。
+  if (control.parentElement !== slot) slot.appendChild(control);
+}
+
+function setBackgroundStyle(style, persist = true) {
+  if (!Object.hasOwn(BACKGROUND_STYLES, style)) return;
+  // タイルだけを交換する。中心・倍率・GPSのCanvas・編集履歴には触れない。
+  if (backgroundLayer) map.removeLayer(backgroundLayer);
+  backgroundStyle = style;
+  map.getPane('tilePane').style.filter = BACKGROUND_STYLES[style].filter;
+  backgroundLayer = createBackgroundLayer(style).addTo(map);
+  $('basemap-select').value = style;
+  $('basemap-hint').hidden = style !== 'gsi';
+  if (persist) {
+    try { localStorage.setItem(BACKGROUND_STYLE_KEY, style); } catch (_) { /* 保存不可でも切替は可能 */ }
+  }
+}
+
+function createBackgroundLayer(style = 'soft') {
+  const config = BACKGROUND_STYLES[style] || BACKGROUND_STYLES.soft;
+  // 標準タイルは API キー不要。通常のブラウザキャッシュを使い、
+  // 表示範囲外の先読み・一括ダウンロードは行わない。
+  const layer = L.tileLayer(config.url, {
+    attribution: config.attribution,
+    maxNativeZoom: config.maxNativeZoom, // 最大倍率では最後の地図を拡大表示する
+    minNativeZoom: config.minNativeZoom,
+    maxZoom: 20,
+    keepBuffer: 1,
+  });
+  let loaded = 0;
+  let failed = 0;
+  let lastNotice = -Infinity;
+  layer.on('loading', () => { loaded = 0; failed = 0; });
+  layer.on('tileload', () => { loaded++; });
+  layer.on('tileerror', () => { failed++; });
+  layer.on('load', () => {
+    // 一部の欠けたタイルだけでは警告しない。GPS処理のエラーと区別する。
+    if (!loaded && failed && Date.now() - lastNotice > 30000) {
+      lastNotice = Date.now();
+      showToast(style === 'gsi'
+        ? '地理院地図を表示できません。海外では「淡色（標準）」をお試しください。GPSデータは変更されません。'
+        : '背景地図を読み込めませんでした。通信状態を確認してください。GPSデータは変更されません。');
+    }
+  });
+  return layer;
+}
+
 async function init() {
   initUpdateBadge();
 
@@ -2093,11 +2171,15 @@ async function init() {
     inertia: false, // ドラッグ終了後の慣性パンで Canvas が遅れるのを防ぐ
   });
 
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-    subdomains: 'abcd',
-    maxZoom: 20,
-  }).addTo(map);
+  positionBackgroundControl();
+  setBackgroundStyle(readBackgroundStyle(), false);
+  $('basemap-select').addEventListener('change', event => {
+    setBackgroundStyle(event.target.value);
+    if ($('toolbar-overflow-menu').contains(event.target)) {
+      setToolbarMenuOpen(false);
+      $('toolbar-menu-btn').focus();
+    }
+  });
 
   // Canvas を Leaflet コンテナに直接追加（パンのCSS変形から独立）
   const container = map.getContainer();
@@ -2376,7 +2458,8 @@ async function init() {
     openInfoModal('about', event.currentTarget);
   });
   window.addEventListener('resize', () => {
-    if (window.innerWidth > 900) setToolbarMenuOpen(false);
+    positionBackgroundControl();
+    if (window.innerWidth > 1200) setToolbarMenuOpen(false);
   });
   const mergeInput = $('merge-file-b');
   $('merge-file-b-button').addEventListener('click', () => mergeInput.click());
@@ -2438,7 +2521,7 @@ async function init() {
     }
     const mod = event.metaKey || event.ctrlKey;
     if (event.key === 'Escape' && eraserActive) setEraserActive(false);
-    if (!sourceFileBytes || event.target.matches('input, textarea')) return;
+    if (!sourceFileBytes || event.target.matches('input, textarea, select')) return;
     if (event.key.toLowerCase() === 'e' && !mod) {
       event.preventDefault();
       setEraserActive(!eraserActive);
