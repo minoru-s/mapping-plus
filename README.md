@@ -50,9 +50,11 @@
 
 ライブラリと背景地図を取得するため、利用時にはインターネット接続が必要です。ただし、`.mapping` ファイルとGPS記録そのものはブラウザ内で処理され、サーバーへアップロードされません。
 
-背景地図は、OpenStreetMap標準タイルの彩度とコントラストを下げた「淡色（標準）」を初期設定としています。上部ツールバーの「背景地図」から[国土地理院の淡色地図](https://maps.gsi.go.jp/development/ichiran.html)にも切り替えられます。画面幅が狭い場合は左端のハンバーガーメニュー内に収まります。GPSの色や編集内容は変わらず、選択はブラウザ内に保存されます。地理院の詳細地図は日本向けで、Zoom 18より拡大した場合はZoom 18の地図を拡大表示します。APIキー・有料契約は不要です。
+背景地図は、[OpenFreeMap](https://openfreemap.org/)のLibertyを初期設定としています。彩度はそのまま、コントラストを下げて明るさを補正し、GPSの軌跡を見やすくしています。上部ツールバーの「背景地図」から、すっきりしたPositron、[国土地理院の淡色地図](https://maps.gsi.go.jp/development/ichiran.html)、従来の淡色化したOpenStreetMapにも切り替えられます。画面幅が狭い場合は左端のハンバーガーメニュー内に収まります。GPSの色や編集内容は変わらず、選択はブラウザ内に保存されます。以前の標準地図を使っていたブラウザでは新しいLibertyへ移行し、以前に選択した地理院地図は引き継ぎます。地理院の詳細地図は日本向けで、Zoom 18より拡大した場合はZoom 18の地図を拡大表示します。APIキー・有料契約は不要です。
 
-表示中の範囲のタイルを取得し、ブラウザのキャッシュを利用します。一括取得やオフライン用の地図保存は行いません。配信サービスの稼働・利用制限により地図が表示できない場合があります（[OpenStreetMapのタイル利用ポリシー](https://operations.osmfoundation.org/policies/tiles/)）。
+LibertyとPositronはMapLibre GL JSで描画するため、WebGLを利用できるブラウザが必要です。描画機能や初回読み込みに問題がある場合は、GPSデータや編集履歴を維持したまま従来の地図へ切り替えます。一時的なエラーでは保存済みの地図選択を上書きしません。
+
+表示範囲周辺の地図データを取得し、ブラウザのキャッシュを利用します。一括取得やオフライン用の地図保存は行いません。OpenFreeMapの公開配信は登録・APIキー不要ですが、稼働保証はありません。配信サービスの稼働・利用制限により地図が表示できない場合があります（[OpenFreeMapの説明](https://openfreemap.org/)、[OpenStreetMapのタイル利用ポリシー](https://operations.osmfoundation.org/policies/tiles/)）。
 
 地理院の淡色地図の小縮尺表示に含まれる海岸線データの出典：Shoreline data is derived from: United States. National Imagery and Mapping Agency. "Vector Map Level 0 (VMAP0)." Bethesda, MD: Denver, CO: The Agency; USGS Information Services, 1997.
 
@@ -73,9 +75,12 @@ python3 -m http.server 8000
 ## 使用ライブラリ・地図
 
 - [Leaflet](https://leafletjs.com/)
+- [MapLibre GL JS](https://maplibre.org/)
+- [MapLibre GL Leaflet](https://github.com/maplibre/maplibre-gl-leaflet)
 - [JSZip](https://stuk.github.io/jszip/)
 - [sql.js](https://sql.js.org/)
 - [OpenStreetMap](https://www.openstreetmap.org/)
+- [OpenFreeMap / OpenMapTiles](https://openfreemap.org/)
 - [地理院タイル（背景を切り替えた場合）](https://maps.gsi.go.jp/development/ichiran.html)
 
 市区町村との面積比較には、国土地理院「令和8年全国都道府県市区町村別面積調」（2026年4月1日時点）を使用しています。

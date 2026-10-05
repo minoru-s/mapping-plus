@@ -11,8 +11,21 @@ const CELL_POPUP_ARROW_WIDTH = 20;
 const CELL_POPUP_ARROW_HEIGHT = 10;
 const EARTH_RADIUS_M = 6371008.8;
 const RANKING_LIMIT = 30;
-const BACKGROUND_STYLE_KEY = 'mapping-plus-background-style';
+const BACKGROUND_STYLE_KEY = 'mapping-plus-background-style-v2';
+const LEGACY_BACKGROUND_STYLE_KEY = 'mapping-plus-background-style';
+const DEFAULT_BACKGROUND_STYLE = 'liberty';
 const BACKGROUND_STYLES = Object.freeze({
+  liberty: {
+    type: 'vector',
+    url: 'https://tiles.openfreemap.org/styles/liberty',
+    // 彩度は変更せず、コントラストを抑える。白地が暗くならないよう明るさを補正。
+    filter: 'contrast(0.65) brightness(1.18)',
+  },
+  positron: {
+    type: 'vector',
+    url: 'https://tiles.openfreemap.org/styles/positron',
+    filter: '',
+  },
   soft: {
     url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
@@ -55,7 +68,10 @@ let loadingTasks = new Map(); // 同じタイルの並行読込は同一 Promise
 let totalCells = 0;
 let map = null;
 let backgroundLayer = null;
-let backgroundStyle = 'soft';
+let backgroundStyle = DEFAULT_BACKGROUND_STYLE;
+let backgroundGeneration = 0;
+let backgroundCleanup = null;
+let vectorBasemapModulePromise = null;
 let canvas = null;
 let ctx = null;
 let updateTimer = null;
@@ -94,7 +110,7 @@ let mergePreviewCanvas = null;
 let mergePreviewCtx = null;
 let mergePreviewFrame = null;
 
-const CURRENT_VERSION = '1.3.1';
+const CURRENT_VERSION = '1.3.2';
 const UPDATE_SEEN_KEY = `mapping-plus-update-seen-${CURRENT_VERSION}`;
 
 // ========================= XOR 復号 =========================
@@ -2106,9 +2122,12 @@ async function processFile(file) {
 function readBackgroundStyle() {
   try {
     const saved = localStorage.getItem(BACKGROUND_STYLE_KEY);
-    return Object.hasOwn(BACKGROUND_STYLES, saved) ? saved : 'soft';
+    if (Object.hasOwn(BACKGROUND_STYLES, saved)) return saved;
+    // 以前の標準地図は新しい標準へ移行。明示的な地理院の選択は引き継ぐ。
+    if (saved === null && localStorage.getItem(LEGACY_BACKGROUND_STYLE_KEY) === 'gsi') return 'gsi';
+    return DEFAULT_BACKGROUND_STYLE;
   } catch (_) {
-    return 'soft';
+    return DEFAULT_BACKGROUND_STYLE;
   }
 }
 
@@ -2119,18 +2138,94 @@ function positionBackgroundControl() {
   if (control.parentElement !== slot) slot.appendChild(control);
 }
 
-function setBackgroundStyle(style, persist = true) {
+async function setBackgroundStyle(style, persist = true) {
   if (!Object.hasOwn(BACKGROUND_STYLES, style)) return;
-  // タイルだけを交換する。中心・倍率・GPSのCanvas・編集履歴には触れない。
-  if (backgroundLayer) map.removeLayer(backgroundLayer);
-  backgroundStyle = style;
-  map.getPane('tilePane').style.filter = BACKGROUND_STYLES[style].filter;
-  backgroundLayer = createBackgroundLayer(style).addTo(map);
+  const generation = ++backgroundGeneration;
+  backgroundCleanup?.();
+  backgroundCleanup = null;
   $('basemap-select').value = style;
   $('basemap-hint').hidden = style !== 'gsi';
   if (persist) {
     try { localStorage.setItem(BACKGROUND_STYLE_KEY, style); } catch (_) { /* 保存不可でも切替は可能 */ }
   }
+  let nextLayer = null;
+  let moduleTimeout = null;
+  try {
+    if (BACKGROUND_STYLES[style].type === 'vector') {
+      moduleTimeout = setTimeout(() => {
+        fallbackBackground(generation, new Error('Map library loading timed out')).catch(console.error);
+      }, 20000);
+      // 必要な時だけ読み込む。ライブラリ取得失敗でもGPS処理は止めない。
+      if (!vectorBasemapModulePromise) {
+        vectorBasemapModulePromise = import('./vector-basemap.mjs').catch(error => {
+          vectorBasemapModulePromise = null;
+          throw error;
+        });
+      }
+      const { maplibreGL } = await vectorBasemapModulePromise;
+      clearTimeout(moduleTimeout);
+      moduleTimeout = null;
+      if (generation !== backgroundGeneration) return;
+      nextLayer = maplibreGL({
+        style: BACKGROUND_STYLES[style].url,
+        interactive: false,
+        pane: 'tilePane',
+        attributionControl: { customAttribution:
+          '<a href="https://openfreemap.org/">OpenFreeMap</a> · © <a href="https://openmaptiles.org/">OpenMapTiles</a> · © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' },
+      });
+    } else {
+      nextLayer = createBackgroundLayer(style);
+    }
+    if (generation !== backgroundGeneration) return;
+    // 背景だけを交換する。中心・倍率・GPSのCanvas・編集履歴には触れない。
+    if (backgroundLayer) map.removeLayer(backgroundLayer);
+    backgroundLayer = null;
+    map.getPane('tilePane').style.filter = BACKGROUND_STYLES[style].filter;
+    nextLayer.addTo(map);
+    backgroundLayer = nextLayer;
+    backgroundStyle = style;
+    if (BACKGROUND_STYLES[style].type === 'vector') watchVectorBackground(nextLayer, generation);
+  } catch (error) {
+    if (generation !== backgroundGeneration) return;
+    // WebGL初期化途中の失敗でも、部分的に作られた背景を残さない。
+    if (nextLayer && map.hasLayer(nextLayer)) {
+      try { map.removeLayer(nextLayer); } catch (_) { nextLayer.getContainer?.()?.remove(); }
+    }
+    if (BACKGROUND_STYLES[style].type === 'vector') await fallbackBackground(generation, error);
+    else console.error(error);
+  } finally {
+    if (moduleTimeout !== null) clearTimeout(moduleTimeout);
+  }
+}
+
+async function fallbackBackground(generation, error) {
+  if (generation !== backgroundGeneration) return;
+  console.warn('OpenFreeMap background unavailable:', error);
+  // 一時的な通信・描画エラーで、ユーザーの保存済み選択を上書きしない。
+  await setBackgroundStyle('soft', false);
+  showToast('OpenFreeMapを表示できないため、従来の淡色地図に切り替えました。GPSデータは変更されません。');
+}
+
+function watchVectorBackground(layer, generation) {
+  const gl = layer.getMaplibreMap();
+  const glCanvas = gl.getCanvas();
+  let lastError = null;
+  const timeout = setTimeout(() => {
+    if (!gl.isStyleLoaded()) fallbackBackground(generation, lastError || new Error('Map loading timed out')).catch(console.error);
+  }, 20000);
+  const onLoad = () => clearTimeout(timeout);
+  // 一部のタイル欠落では地図全体を切り替えない。初回表示の失敗はtimeoutで判定。
+  const onError = event => { lastError = event.error; };
+  const onContextLost = () => fallbackBackground(generation, new Error('WebGL context lost')).catch(console.error);
+  gl.on('load', onLoad);
+  gl.on('error', onError);
+  glCanvas.addEventListener('webglcontextlost', onContextLost);
+  backgroundCleanup = () => {
+    clearTimeout(timeout);
+    gl.off('load', onLoad);
+    gl.off('error', onError);
+    glCanvas.removeEventListener('webglcontextlost', onContextLost);
+  };
 }
 
 function createBackgroundLayer(style = 'soft') {
@@ -2155,7 +2250,7 @@ function createBackgroundLayer(style = 'soft') {
     if (!loaded && failed && Date.now() - lastNotice > 30000) {
       lastNotice = Date.now();
       showToast(style === 'gsi'
-        ? '地理院地図を表示できません。海外では「淡色（標準）」をお試しください。GPSデータは変更されません。'
+        ? '地理院地図を表示できません。海外では「Liberty（標準）」または「Positron」をお試しください。GPSデータは変更されません。'
         : '背景地図を読み込めませんでした。通信状態を確認してください。GPSデータは変更されません。');
     }
   });
@@ -2168,13 +2263,17 @@ async function init() {
   map = L.map('map', {
     center: [35.68, 139.80],
     zoom: 13,
+    minZoom: 1, // Leaflet / MapLibreの最小倍率での同期を安定させる
+    maxZoom: 20,
+    maxBounds: [[180, -Infinity], [-180, Infinity]],
+    maxBoundsViscosity: 1,
     inertia: false, // ドラッグ終了後の慣性パンで Canvas が遅れるのを防ぐ
   });
 
   positionBackgroundControl();
-  setBackgroundStyle(readBackgroundStyle(), false);
+  setBackgroundStyle(readBackgroundStyle(), false).catch(console.error);
   $('basemap-select').addEventListener('change', event => {
-    setBackgroundStyle(event.target.value);
+    setBackgroundStyle(event.target.value).catch(console.error);
     if ($('toolbar-overflow-menu').contains(event.target)) {
       setToolbarMenuOpen(false);
       $('toolbar-menu-btn').focus();
@@ -2327,6 +2426,8 @@ async function init() {
   });
 
   map.on('zoomend', () => {
+    // GPUの背景も同じイベント内で描画し、Canvasとの1フレームのずれを避ける。
+    backgroundLayer?.getMaplibreMap?.()?.redraw();
     isZooming = false;
     L.DomUtil.removeClass(container, 'leaflet-zoom-anim');
 
